@@ -7,6 +7,7 @@ Then open:  http://127.0.0.1:5000
 """
 
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -53,9 +54,21 @@ def resolve_sub(sub_id, sub_map):
 
 def safe_amount(val):
     try:
-        return float(str(val).replace(",", "").strip())
+        if val is None:
+            return 0.0
+        cleaned = re.sub(r"[^0-9.\-]", "", str(val).replace(",", "").strip())
+        return float(cleaned) if cleaned else 0.0
     except Exception:
         return 0.0
+
+
+def status_group(record):
+    status = str(record.get("status", "")).strip().lower()
+    if status == "approved":
+        return "approved"
+    if status == "pending":
+        return "pending"
+    return "unclassified"
 
 
 def month_label(dt):
@@ -178,14 +191,18 @@ def load_all(db, sub_map, filters=None):
     all_advances = list(db["CashAdvance"].find({}))
     advances = apply_filters(all_advances)
     data["ca_total"]    = len(advances)
-    data["ca_approved"] = sum(1 for r in advances if r.get("status") == "Approved")
-    data["ca_pending"]  = sum(1 for r in advances if r.get("status") == "Pending")
+    data["ca_approved"] = sum(1 for r in advances if status_group(r) == "approved")
+    data["ca_pending"]  = sum(1 for r in advances if status_group(r) == "pending")
+    data["ca_unclassified"] = sum(1 for r in advances if status_group(r) == "unclassified")
     data["ca_amount"]   = sum(safe_amount(r.get("amount", 0)) for r in advances)
     data["ca_approved_amount"] = sum(
-        safe_amount(r.get("amount", 0)) for r in advances if r.get("status") == "Approved"
+        safe_amount(r.get("amount", 0)) for r in advances if status_group(r) == "approved"
     )
     data["ca_pending_amount"] = sum(
-        safe_amount(r.get("amount", 0)) for r in advances if r.get("status") == "Pending"
+        safe_amount(r.get("amount", 0)) for r in advances if status_group(r) == "pending"
+    )
+    data["ca_unclassified_amount"] = sum(
+        safe_amount(r.get("amount", 0)) for r in advances if status_group(r) == "unclassified"
     )
 
     ca_by_sub   = defaultdict(float)
@@ -203,8 +220,9 @@ def load_all(db, sub_map, filters=None):
     all_expenses = list(db["ExpenseClaim"].find({}))
     expenses = apply_filters(all_expenses)
     data["ec_total"]    = len(expenses)
-    data["ec_approved"] = sum(1 for r in expenses if r.get("status") == "Approved")
-    data["ec_pending"]  = sum(1 for r in expenses if r.get("status") == "Pending")
+    data["ec_approved"] = sum(1 for r in expenses if status_group(r) == "approved")
+    data["ec_pending"]  = sum(1 for r in expenses if status_group(r) == "pending")
+    data["ec_unclassified"] = sum(1 for r in expenses if status_group(r) == "unclassified")
 
     def ec_total_amount(r):
         items = r.get("expense_claim", [])
@@ -214,10 +232,13 @@ def load_all(db, sub_map, filters=None):
 
     data["ec_amount"] = sum(ec_total_amount(r) for r in expenses)
     data["ec_approved_amount"] = sum(
-        ec_total_amount(r) for r in expenses if r.get("status") == "Approved"
+        ec_total_amount(r) for r in expenses if status_group(r) == "approved"
     )
     data["ec_pending_amount"] = sum(
-        ec_total_amount(r) for r in expenses if r.get("status") == "Pending"
+        ec_total_amount(r) for r in expenses if status_group(r) == "pending"
+    )
+    data["ec_unclassified_amount"] = sum(
+        ec_total_amount(r) for r in expenses if status_group(r) == "unclassified"
     )
 
     ec_by_sub   = defaultdict(float)
@@ -235,14 +256,18 @@ def load_all(db, sub_map, filters=None):
     all_rtps = list(db["RequestToPaySupplier"].find({}))
     rtps = apply_filters(all_rtps)
     data["rtps_total"]    = len(rtps)
-    data["rtps_approved"] = sum(1 for r in rtps if r.get("status") == "Approved")
-    data["rtps_pending"]  = sum(1 for r in rtps if r.get("status") == "Pending")
+    data["rtps_approved"] = sum(1 for r in rtps if status_group(r) == "approved")
+    data["rtps_pending"]  = sum(1 for r in rtps if status_group(r) == "pending")
+    data["rtps_unclassified"] = sum(1 for r in rtps if status_group(r) == "unclassified")
     data["rtps_amount"]   = sum(safe_amount(r.get("amount", 0)) for r in rtps)
     data["rtps_approved_amount"] = sum(
-        safe_amount(r.get("amount", 0)) for r in rtps if r.get("status") == "Approved"
+        safe_amount(r.get("amount", 0)) for r in rtps if status_group(r) == "approved"
     )
     data["rtps_pending_amount"] = sum(
-        safe_amount(r.get("amount", 0)) for r in rtps if r.get("status") == "Pending"
+        safe_amount(r.get("amount", 0)) for r in rtps if status_group(r) == "pending"
+    )
+    data["rtps_unclassified_amount"] = sum(
+        safe_amount(r.get("amount", 0)) for r in rtps if status_group(r) == "unclassified"
     )
 
     rtps_by_sub      = defaultdict(float)
@@ -293,10 +318,14 @@ def load_all(db, sub_map, filters=None):
     pending_spend = (
         data["ca_pending_amount"] + data["ec_pending_amount"] + data["rtps_pending_amount"]
     )
+    unclassified_spend = (
+        data["ca_unclassified_amount"] + data["ec_unclassified_amount"] + data["rtps_unclassified_amount"]
+    )
     data["total_requests"] = data["leave_total"] + data["ca_total"] + data["ec_total"] + data["rtps_total"]
     data["total_spend"] = total_spend
     data["approved_spend"] = approved_spend
     data["pending_spend"] = pending_spend
+    data["unclassified_spend"] = unclassified_spend
 
     spend_by_sub = defaultdict(float)
     for source in (ca_by_sub, ec_by_sub, rtps_by_sub):
@@ -673,6 +702,7 @@ TEMPLATE = """
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
+        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.ca_unclassified_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#9b59b6">
@@ -682,6 +712,7 @@ TEMPLATE = """
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
+        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.ec_unclassified_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#27ae60">
@@ -691,6 +722,7 @@ TEMPLATE = """
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
+        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.rtps_unclassified_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#e74c3c">
@@ -705,6 +737,7 @@ TEMPLATE = """
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
+        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.unclassified_spend) }}</strong></div>
       </div>
     </div>
   </div>
@@ -883,8 +916,8 @@ def dashboard():
     charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()),
                                 list(d["ca_by_sub"].values()),
                                 "Cash Advance Amount by Subsidiary (₦)", ORANGE)
-    charts["ca_status"]  = pie(["Approved","Pending"],
-                                [d["ca_approved"], d["ca_pending"]],
+    charts["ca_status"]  = pie(["Approved","Pending","Unclassified"],
+                                [d["ca_approved"], d["ca_pending"], d["ca_unclassified"]],
                                 "Cash Advance Status")
     charts["ca_trend"]   = line(list(d["ca_by_month"].keys()),
                                  list(d["ca_by_month"].values()),
@@ -894,8 +927,8 @@ def dashboard():
     charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()),
                                 list(d["ec_by_sub"].values()),
                                 "Expense Claims Amount by Subsidiary (₦)", PURPLE)
-    charts["ec_status"]  = pie(["Approved","Pending"],
-                                [d["ec_approved"], d["ec_pending"]],
+    charts["ec_status"]  = pie(["Approved","Pending","Unclassified"],
+                                [d["ec_approved"], d["ec_pending"], d["ec_unclassified"]],
                                 "Expense Claim Status")
     charts["ec_trend"]   = line(list(d["ec_by_month"].keys()),
                                  list(d["ec_by_month"].values()),
