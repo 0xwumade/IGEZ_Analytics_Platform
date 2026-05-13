@@ -1,0 +1,24 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+
+sync.log
+sync_cursor.json
+cash advance.json
+expense claim.json
+leave request.json
+rtps.json
+subsidiary.json
+
+attachments_local/
+backup/
+pdf_reports/
+segmented_cash_advance/
+segmented_expense_claim/
+segmented_leave_request/
+segmented_rtps/
+mongodb-database-tools-windows-x86_64-*/
+mongosh-*-win32-x64/
+
+*.zip
