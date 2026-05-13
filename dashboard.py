@@ -8,6 +8,7 @@ Then open:  http://127.0.0.1:5000
 
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -22,6 +23,8 @@ load_dotenv()
 
 app = Flask(__name__)
 DB_URL = os.getenv("DATABASE_URL")
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Africa/Lagos")
+LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -61,6 +64,10 @@ def month_label(dt):
     return "Unknown"
 
 
+def app_now():
+    return datetime.now(LOCAL_TZ).replace(tzinfo=None)
+
+
 def parse_date_arg(value):
     try:
         return datetime.strptime(value, "%Y-%m-%d") if value else None
@@ -69,7 +76,7 @@ def parse_date_arg(value):
 
 
 def period_bounds(period):
-    today = datetime.now()
+    today = app_now()
     start_today = datetime(today.year, today.month, today.day)
     if period == "today":
         return start_today, start_today + timedelta(days=1)
@@ -91,7 +98,7 @@ def record_date(record):
 
 
 def previous_month_bounds():
-    today = datetime.now()
+    today = app_now()
     this_month = datetime(today.year, today.month, 1)
     last_day_previous = this_month - timedelta(days=1)
     previous_start = datetime(last_day_previous.year, last_day_previous.month, 1)
@@ -339,13 +346,14 @@ def load_all(db, sub_map, filters=None):
     ]
     data["bottlenecks"] = sorted(bottlenecks, key=lambda x: x["count"], reverse=True)[:6]
 
-    month_start = datetime(datetime.now().year, datetime.now().month, 1)
+    current_time = app_now()
+    month_start = datetime(current_time.year, current_time.month, 1)
     previous_start, previous_end = previous_month_bounds()
     current_requests = (
-        count_between(all_leaves, month_start, datetime.now() + timedelta(days=1))
-        + count_between(all_advances, month_start, datetime.now() + timedelta(days=1))
-        + count_between(all_expenses, month_start, datetime.now() + timedelta(days=1))
-        + count_between(all_rtps, month_start, datetime.now() + timedelta(days=1))
+        count_between(all_leaves, month_start, current_time + timedelta(days=1))
+        + count_between(all_advances, month_start, current_time + timedelta(days=1))
+        + count_between(all_expenses, month_start, current_time + timedelta(days=1))
+        + count_between(all_rtps, month_start, current_time + timedelta(days=1))
     )
     previous_requests = (
         count_between(all_leaves, previous_start, previous_end)
@@ -354,9 +362,9 @@ def load_all(db, sub_map, filters=None):
         + count_between(all_rtps, previous_start, previous_end)
     )
     current_spend = (
-        spend_between(all_advances, lambda r: safe_amount(r.get("amount", 0)), month_start, datetime.now() + timedelta(days=1))
-        + spend_between(all_expenses, ec_total_amount, month_start, datetime.now() + timedelta(days=1))
-        + spend_between(all_rtps, lambda r: safe_amount(r.get("amount", 0)), month_start, datetime.now() + timedelta(days=1))
+        spend_between(all_advances, lambda r: safe_amount(r.get("amount", 0)), month_start, current_time + timedelta(days=1))
+        + spend_between(all_expenses, ec_total_amount, month_start, current_time + timedelta(days=1))
+        + spend_between(all_rtps, lambda r: safe_amount(r.get("amount", 0)), month_start, current_time + timedelta(days=1))
     )
     previous_spend = (
         spend_between(all_advances, lambda r: safe_amount(r.get("amount", 0)), previous_start, previous_end)
@@ -817,7 +825,7 @@ ERROR_TEMPLATE = """
 
 @app.route("/")
 def dashboard():
-    now = datetime.now().strftime("%d %b %Y, %H:%M")
+    now = app_now().strftime("%d %b %Y, %H:%M")
     try:
         db      = get_db()
         sub_map = get_subsidiary_map(db)
