@@ -322,6 +322,8 @@ def load_all(db, sub_map, filters=None):
         data["ca_unclassified_amount"] + data["ec_unclassified_amount"] + data["rtps_unclassified_amount"]
     )
     data["total_requests"] = data["leave_total"] + data["ca_total"] + data["ec_total"] + data["rtps_total"]
+    data["total_approved_requests"] = data["leave_approved"] + data["ca_approved"] + data["ec_approved"] + data["rtps_approved"]
+    data["system_ready"] = data["total_requests"] == 0
     data["total_spend"] = total_spend
     data["approved_spend"] = approved_spend
     data["pending_spend"] = pending_spend
@@ -417,20 +419,35 @@ def load_all(db, sub_map, filters=None):
 
 # ── Chart builders ────────────────────────────────────────────────────────────
 
-def bar(x, y, title, color="#2c3e50", xlabel="", ylabel=""):
+def blue_scale(count):
+    palette = ["#0b3a75", "#1155cc", "#1d6ff2", "#4c93ff", "#8fc3ff", "#c7e2ff"]
+    return [palette[i % len(palette)] for i in range(max(count, 1))]
+
+
+def chart_layout(fig, title, height, margin, font_size=11, xlabel="", ylabel=""):
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=15, color="#082f63")),
+        xaxis_title=xlabel,
+        yaxis_title=ylabel,
+        plot_bgcolor="rgba(255,255,255,0)",
+        paper_bgcolor="rgba(255,255,255,0)",
+        margin=margin,
+        font=dict(family="Segoe UI, Arial, sans-serif", size=font_size, color="#183b68"),
+        height=height,
+    )
+    fig.update_xaxes(showgrid=False, zeroline=False, showline=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, showline=False)
+    return fig
+
+
+def bar(x, y, title, color="#1155cc", xlabel="", ylabel=""):
     fig = go.Figure(go.Bar(
         x=x, y=y,
-        marker_color=color,
+        marker=dict(color=blue_scale(len(y)), line=dict(color="rgba(255,255,255,0.75)", width=1)),
         text=[f"{v:,.0f}" for v in y],
         textposition="outside"
     ))
-    fig.update_layout(
-        title=title, xaxis_title=xlabel, yaxis_title=ylabel,
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(t=50, b=40, l=40, r=20),
-        font=dict(family="Segoe UI", size=11),
-        height=320
-    )
+    chart_layout(fig, title, 320, dict(t=50, b=40, l=40, r=20), xlabel=xlabel, ylabel=ylabel)
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
@@ -438,48 +455,32 @@ def pie(labels, values, title):
     fig = go.Figure(go.Pie(
         labels=labels, values=values,
         hole=0.4,
-        marker=dict(colors=px.colors.qualitative.Set2)
+        marker=dict(colors=blue_scale(len(values)), line=dict(color="white", width=2))
     ))
-    fig.update_layout(
-        title=title,
-        paper_bgcolor="white",
-        margin=dict(t=50, b=20, l=20, r=20),
-        font=dict(family="Segoe UI", size=11),
-        height=320
-    )
+    chart_layout(fig, title, 320, dict(t=50, b=20, l=20, r=20))
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
-def line(x, y, title, color="#2980b9"):
+def line(x, y, title, color="#1155cc"):
     fig = go.Figure(go.Scatter(
         x=x, y=y, mode="lines+markers",
-        line=dict(color=color, width=2),
-        marker=dict(size=6)
+        fill="tozeroy",
+        fillcolor="rgba(76,147,255,0.18)",
+        line=dict(color=color, width=3, shape="spline"),
+        marker=dict(size=7, color="#ffffff", line=dict(color=color, width=2))
     ))
-    fig.update_layout(
-        title=title,
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(t=50, b=40, l=40, r=20),
-        font=dict(family="Segoe UI", size=11),
-        height=300
-    )
+    chart_layout(fig, title, 300, dict(t=50, b=40, l=40, r=20))
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
-def hbar(x, y, title, color="#27ae60"):
+def hbar(x, y, title, color="#1155cc"):
     fig = go.Figure(go.Bar(
         x=x, y=y, orientation="h",
-        marker_color=color,
+        marker=dict(color=blue_scale(len(x)), line=dict(color="rgba(255,255,255,0.75)", width=1)),
         text=[f"₦{v:,.0f}" for v in x],
         textposition="outside"
     ))
-    fig.update_layout(
-        title=title,
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(t=50, b=20, l=120, r=60),
-        font=dict(family="Segoe UI", size=10),
-        height=340
-    )
+    chart_layout(fig, title, 340, dict(t=50, b=20, l=120, r=60), font_size=10)
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 # ── HTML template ─────────────────────────────────────────────────────────────
@@ -494,90 +495,144 @@ TEMPLATE = """
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; color: #333; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background:
+      radial-gradient(circle at top left, rgba(76,147,255,0.20), transparent 34%),
+      linear-gradient(180deg, #f8fbff 0%, #edf5ff 100%);
+    color: #0b2447;
+  }
 
   /* Header */
   .header {
-    background: linear-gradient(135deg, #2c3e50, #3498db);
-    color: white; padding: 20px 32px;
+    background: linear-gradient(135deg, #061b3a 0%, #082f63 55%, #1155cc 100%);
+    color: white; padding: 22px 32px;
     display: flex; align-items: center; justify-content: space-between;
+    box-shadow: 0 18px 40px rgba(8,47,99,0.22);
   }
-  .header h1 { font-size: 22px; font-weight: 600; }
+  .header h1, .header .h1 { font-size: 23px; font-weight: 800; letter-spacing: 0; }
   .header .sub { font-size: 13px; opacity: 0.8; margin-top: 4px; }
   .refresh-btn {
-    background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.4);
-    color: white; padding: 8px 18px; border-radius: 6px;
-    cursor: pointer; font-size: 13px; text-decoration: none;
+    background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.42);
+    color: white; padding: 9px 18px; border-radius: 8px;
+    cursor: pointer; font-size: 13px; font-weight: 700; text-decoration: none;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.18);
   }
   .refresh-btn:hover { background: rgba(255,255,255,0.3); }
 
   /* Layout */
   .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
   .section-title {
-    font-size: 16px; font-weight: 600; color: #2c3e50;
+    font-size: 16px; font-weight: 800; color: #082f63;
     margin: 28px 0 14px; padding-left: 10px;
-    border-left: 4px solid #3498db;
+    border-left: 4px solid #1155cc;
   }
   .filter-bar {
-    background: white; border-radius: 10px; padding: 16px;
+    background: rgba(255,255,255,0.74); border: 1px solid rgba(143,195,255,0.50);
+    border-radius: 12px; padding: 16px;
     display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto; gap: 12px;
-    align-items: end; box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    align-items: end; box-shadow: 0 18px 45px rgba(8,47,99,0.12);
+    backdrop-filter: blur(18px);
   }
-  .filter-bar label { display: grid; gap: 6px; font-size: 12px; color: #667; font-weight: 600; }
+  .filter-bar label { display: grid; gap: 6px; font-size: 12px; color: #244a78; font-weight: 800; }
   .filter-bar select, .filter-bar input {
-    width: 100%; border: 1px solid #d9dee7; border-radius: 6px; padding: 9px 10px;
-    font: inherit; color: #2c3e50; background: #fff;
+    width: 100%; border: 1px solid #c7ddf6; border-radius: 8px; padding: 9px 10px;
+    font: inherit; color: #082f63; background: rgba(255,255,255,0.92);
   }
+  .filter-bar select:disabled, .filter-bar input:disabled {
+    color: #c0392b; background: #fff5f5; border-color: #e74c3c; cursor: not-allowed;
+  }
+  .period-cancel-option { color: #c0392b; font-weight: 700; }
+  .filter-alert { display: none; }
   .filter-bar button {
-    border: 0; border-radius: 6px; padding: 10px 16px; background: #2c3e50;
+    border: 0; border-radius: 8px; padding: 10px 18px; background: #1155cc;
     color: white; font-weight: 600; cursor: pointer;
+    box-shadow: 0 14px 26px rgba(17,85,204,0.28);
+  }
+  .filter-bar button:disabled {
+    background: #cbd5df; cursor: not-allowed;
+  }
+  .filter-hint {
+    grid-column: 4 / -1; color: #c0392b; font-size: 12px; font-weight: 700;
+    min-height: 16px; margin-top: -4px; text-align: right;
   }
   .executive-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 16px; }
   .signal-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .signal {
-    background: #fff; border-radius: 10px; padding: 16px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08); border-left: 4px solid var(--accent, #3498db);
+    background: linear-gradient(145deg, rgba(255,255,255,0.88), rgba(231,243,255,0.62));
+    border: 1px solid rgba(143,195,255,0.56); border-radius: 12px; padding: 16px;
+    box-shadow: 0 20px 46px rgba(8,47,99,0.13); border-left: 4px solid var(--accent, #1155cc);
+    backdrop-filter: blur(16px);
   }
-  .signal .label { font-size: 12px; color: #778; text-transform: uppercase; letter-spacing: 0.5px; }
-  .signal .value { margin-top: 8px; font-size: 18px; color: #2c3e50; font-weight: 700; }
-  .signal .sub { margin-top: 4px; font-size: 12px; color: #889; }
+  .signal .label { font-size: 12px; color: #4b6f9b; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 800; }
+  .signal .value { margin-top: 8px; font-size: 21px; color: #061b3a; font-weight: 900; }
+  .signal .sub { margin-top: 4px; font-size: 12px; color: #5d7899; }
   .insight-card {
-    background: #111827; color: white; border-radius: 10px; padding: 18px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    background: linear-gradient(145deg, #061b3a 0%, #082f63 58%, #0b3a75 100%);
+    color: white; border-radius: 12px; padding: 18px;
+    box-shadow: 0 24px 54px rgba(6,27,58,0.24);
   }
   .insight-card h3 { font-size: 15px; margin-bottom: 12px; }
   .insight-card li { margin: 10px 0 0 18px; color: #dbeafe; font-size: 13px; line-height: 1.45; }
+  .ready-state {
+    min-height: 250px; display: grid; place-items: center; text-align: center;
+    padding: 18px 12px 10px;
+  }
+  .ready-orb {
+    width: 118px; height: 118px; border-radius: 50%;
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255,255,255,0.82), transparent 0 12%, transparent 26%),
+      radial-gradient(circle at 50% 52%, rgba(76,147,255,0.88), rgba(17,85,204,0.42) 38%, rgba(8,47,99,0.26) 64%, rgba(255,255,255,0.10));
+    box-shadow: 0 0 42px rgba(76,147,255,0.58), inset -18px -22px 34px rgba(0,0,0,0.34), inset 16px 16px 28px rgba(255,255,255,0.16);
+    opacity: 0.88; margin: 2px auto 22px;
+    animation: readyPulse 3.2s ease-in-out infinite;
+  }
+  .ready-title {
+    color: #e5e7eb; font-size: 20px; font-weight: 700; letter-spacing: 0;
+    text-shadow: 0 12px 30px rgba(0,0,0,0.32);
+  }
+  .ready-copy {
+    max-width: 470px; margin-top: 10px; color: #b7c4d6; font-size: 13px; line-height: 1.55;
+  }
+  @keyframes readyPulse {
+    0%, 100% { transform: scale(0.98); box-shadow: 0 0 30px rgba(76,147,255,0.38), inset -18px -22px 34px rgba(0,0,0,0.34), inset 16px 16px 28px rgba(255,255,255,0.12); }
+    50% { transform: scale(1.02); box-shadow: 0 0 58px rgba(76,147,255,0.70), inset -18px -22px 34px rgba(0,0,0,0.30), inset 16px 16px 28px rgba(255,255,255,0.16); }
+  }
   .bottleneck-list { display: grid; gap: 9px; margin-top: 12px; }
   .bottleneck-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
-  .bottleneck-row strong { color: #e74c3c; }
+  .bottleneck-row strong { color: #4c93ff; }
 
   /* KPI cards */
   .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
   .kpi {
-    background: white; border-radius: 10px; padding: 18px 20px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    border-top: 4px solid var(--accent, #3498db);
+    background: linear-gradient(145deg, rgba(255,255,255,0.90), rgba(231,243,255,0.66));
+    border: 1px solid rgba(143,195,255,0.52); border-radius: 12px; padding: 18px 20px;
+    box-shadow: 0 22px 50px rgba(8,47,99,0.13);
+    border-top: 4px solid var(--accent, #1155cc);
+    backdrop-filter: blur(16px);
   }
-  .kpi .label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-  .kpi .value { font-size: 28px; font-weight: 700; color: #2c3e50; margin: 6px 0 2px; }
-  .kpi .sub   { font-size: 12px; color: #aaa; }
-  .amount-breakdown { margin-top: 10px; display: grid; gap: 5px; font-size: 12px; color: #555; }
+  .kpi .label { font-size: 12px; color: #4b6f9b; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 800; }
+  .kpi .value { font-size: 30px; font-weight: 900; color: #061b3a; margin: 6px 0 2px; }
+  .kpi .sub   { font-size: 12px; color: #5d7899; }
+  .amount-breakdown { margin-top: 10px; display: grid; gap: 5px; font-size: 12px; color: #456489; }
   .amount-breakdown div { display: flex; justify-content: space-between; gap: 12px; }
-  .amount-breakdown strong { color: #2c3e50; font-weight: 600; }
+  .amount-breakdown strong { color: #082f63; font-weight: 800; }
 
   /* Chart grid */
   .chart-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .chart-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
   .chart-card {
-    background: white; border-radius: 10px; padding: 16px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    background: linear-gradient(145deg, rgba(255,255,255,0.92), rgba(239,247,255,0.72));
+    border: 1px solid rgba(143,195,255,0.48); border-radius: 12px; padding: 16px;
+    box-shadow: 0 22px 50px rgba(8,47,99,0.12);
+    backdrop-filter: blur(14px);
   }
   .chart-card.full { grid-column: 1 / -1; }
 
   /* Approval table */
   .approval-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .approval-table th {
-    background: #2c3e50; color: white;
+    background: #082f63; color: white;
     padding: 10px 14px; text-align: left;
   }
   .approval-table td { padding: 9px 14px; border-bottom: 1px solid #f0f0f0; }
@@ -592,6 +647,7 @@ TEMPLATE = """
 
   @media (max-width: 900px) {
     .filter-bar, .executive-grid, .signal-grid, .chart-grid-2, .chart-grid-3 { grid-template-columns: 1fr; }
+    .filter-hint { grid-column: 1; text-align: left; }
   }
 </style>
 </head>
@@ -607,16 +663,20 @@ TEMPLATE = """
 
 <div class="container">
 
-  <form class="filter-bar" method="get">
+  <form class="filter-bar" method="get" id="filterForm">
     <label>
       Period
-      <select name="period">
-        <option value="all" {% if filters.period == "all" %}selected{% endif %}>All time</option>
-        <option value="today" {% if filters.period == "today" %}selected{% endif %}>Today</option>
-        <option value="week" {% if filters.period == "week" %}selected{% endif %}>This week</option>
-        <option value="month" {% if filters.period == "month" %}selected{% endif %}>This month</option>
-        <option value="quarter" {% if filters.period == "quarter" %}selected{% endif %}>This quarter</option>
-        <option value="year" {% if filters.period == "year" %}selected{% endif %}>This year</option>
+      <select name="period" id="periodFilter" {% if filters.date_selection_active %}class="period-disabled" disabled{% endif %}>
+        {% if filters.date_selection_active %}
+        <option value="date_active" selected>🚫 Date range active</option>
+        {% endif %}
+        <option value="today" {% if filters.period == "today" and not filters.date_selection_active %}selected{% endif %}>Today</option>
+        <option value="week" {% if filters.period == "week" and not filters.date_selection_active %}selected{% endif %}>This week</option>
+        <option value="month" {% if filters.period == "month" and not filters.date_selection_active %}selected{% endif %}>This month</option>
+        <option value="quarter" {% if filters.period == "quarter" and not filters.date_selection_active %}selected{% endif %}>This quarter</option>
+        <option value="year" {% if filters.period == "year" and not filters.date_selection_active %}selected{% endif %}>This year</option>
+        <option value="all" {% if filters.period == "all" and not filters.date_selection_active %}selected{% endif %}>All time</option>
+        <option value="cancel_period" class="period-cancel-option">Cancel</option>
       </select>
     </label>
     <label>
@@ -630,43 +690,46 @@ TEMPLATE = """
     </label>
     <label>
       From
-      <input type="date" name="start" value="{{ filters.start }}">
+      <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="start" id="startDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.start }}{% endif %}" data-date-value="{{ filters.start }}" {% if filters.period_filter_active %}disabled{% endif %}>
+      <span class="filter-alert" id="startDateHint">{% if filters.period_filter_active %}🚫 Period active{% elif filters.date_range_incomplete and not filters.start %}Select From{% endif %}</span>
     </label>
     <label>
       To
-      <input type="date" name="end" value="{{ filters.end }}">
+      <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="end" id="endDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.end }}{% endif %}" data-date-value="{{ filters.end }}" {% if filters.period_filter_active %}disabled{% endif %}>
+      <span class="filter-alert" id="endDateHint">{% if filters.period_filter_active %}🚫 Period active{% elif filters.date_range_incomplete and not filters.end %}Select To{% endif %}</span>
     </label>
-    <button type="submit">Apply</button>
+    <button type="submit" id="applyFilters" {% if filters.date_range_incomplete or filters.date_range_invalid %}disabled{% endif %}>Apply</button>
+    <div class="filter-hint" id="filterHint">{% if filters.date_range_invalid %}From date cannot be later than To date.{% elif filters.date_range_incomplete %}Select both From and To dates before applying.{% endif %}</div>
   </form>
 
   <div class="executive-grid">
     <div class="signal-grid">
-      <div class="signal" style="--accent:#1abc9c">
+      <div class="signal" style="--accent:#1155cc">
         <div class="label">Approved Spend</div>
         <div class="value">NGN {{ "{:,.0f}".format(d.approved_spend) }}</div>
         <div class="sub">Cleared across CA, EC and RTPS</div>
       </div>
-      <div class="signal" style="--accent:#f39c12">
+      <div class="signal" style="--accent:#1d6ff2">
         <div class="label">Waiting Approval</div>
         <div class="value">NGN {{ "{:,.0f}".format(d.pending_spend) }}</div>
         <div class="sub">{{ d.highest_pending_module }} is the largest queue</div>
       </div>
-      <div class="signal" style="--accent:#3498db">
+      <div class="signal" style="--accent:#4c93ff">
         <div class="label">This Month</div>
         <div class="value">NGN {{ "{:,.0f}".format(d.month_compare.spend) }}</div>
         <div class="sub">Spend {{ d.month_compare.spend_change }} vs last month</div>
       </div>
-      <div class="signal" style="--accent:#9b59b6">
+      <div class="signal" style="--accent:#0b3a75">
         <div class="label">This Month Requests</div>
         <div class="value">{{ d.month_compare.requests }}</div>
         <div class="sub">Volume {{ d.month_compare.requests_change }} vs last month</div>
       </div>
-      <div class="signal" style="--accent:#27ae60">
+      <div class="signal" style="--accent:#8fc3ff">
         <div class="label">Top Subsidiary</div>
         <div class="value">{{ d.top_spending_subsidiary }}</div>
         <div class="sub">NGN {{ "{:,.0f}".format(d.top_spending_subsidiary_amount) }}</div>
       </div>
-      <div class="signal" style="--accent:#e74c3c">
+      <div class="signal" style="--accent:#082f63">
         <div class="label">Approval Watch</div>
         <div class="value">{{ d.lowest_approval_label }}</div>
         <div class="sub">{{ d.lowest_approval_rate }}% approval rate</div>
@@ -674,6 +737,15 @@ TEMPLATE = """
     </div>
     <div class="insight-card">
       <h3>Executive Insights</h3>
+      {% if d.system_ready %}
+      <div class="ready-state">
+        <div>
+          <div class="ready-orb" aria-hidden="true"></div>
+          <div class="ready-title">Current Status: Optimal.</div>
+          <div class="ready-copy">Your dashboard is up to date with no pending actions. Real-time spending and approval insights will populate here as requests arrive.</div>
+        </div>
+      </div>
+      {% else %}
       <ul>
         {% for insight in d.insights %}
         <li>{{ insight }}</li>
@@ -684,60 +756,57 @@ TEMPLATE = """
         <div class="bottleneck-row"><span>{{ item.label }}</span><strong>{{ item.count }}</strong></div>
         {% endfor %}
       </div>
+      {% endif %}
     </div>
   </div>
 
   <!-- ── KPI OVERVIEW ── -->
   <div class="section-title">Overview</div>
   <div class="kpi-grid">
-    <div class="kpi" style="--accent:#3498db">
+    <div class="kpi" style="--accent:#1155cc">
       <div class="label">Leave Requests</div>
-      <div class="value">{{ d.leave_total }}</div>
+      <div class="value">{{ d.leave_approved }}/{{ d.leave_total }}</div>
       <div class="sub">{{ d.leave_approved }} approved · {{ d.leave_pending }} pending</div>
     </div>
-    <div class="kpi" style="--accent:#e67e22">
+    <div class="kpi" style="--accent:#1d6ff2">
       <div class="label">Cash Advances</div>
-      <div class="value">{{ d.ca_total }}</div>
+      <div class="value">{{ d.ca_approved }}/{{ d.ca_total }}</div>
       <div class="sub">₦{{ "{:,.0f}".format(d.ca_amount) }} total</div>
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
-        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.ca_unclassified_amount) }}</strong></div>
       </div>
     </div>
-    <div class="kpi" style="--accent:#9b59b6">
+    <div class="kpi" style="--accent:#4c93ff">
       <div class="label">Expense Claims</div>
-      <div class="value">{{ d.ec_total }}</div>
+      <div class="value">{{ d.ec_approved }}/{{ d.ec_total }}</div>
       <div class="sub">₦{{ "{:,.0f}".format(d.ec_amount) }} total</div>
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
-        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.ec_unclassified_amount) }}</strong></div>
       </div>
     </div>
-    <div class="kpi" style="--accent:#27ae60">
+    <div class="kpi" style="--accent:#0b3a75">
       <div class="label">RTPS</div>
-      <div class="value">{{ d.rtps_total }}</div>
+      <div class="value">{{ d.rtps_approved }}/{{ d.rtps_total }}</div>
       <div class="sub">₦{{ "{:,.0f}".format(d.rtps_amount) }} total</div>
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
-        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.rtps_unclassified_amount) }}</strong></div>
       </div>
     </div>
-    <div class="kpi" style="--accent:#e74c3c">
+    <div class="kpi" style="--accent:#8fc3ff">
       <div class="label">Total Requests</div>
-      <div class="value">{{ d.total_requests }}</div>
-      <div class="sub">Across all modules</div>
+      <div class="value">{{ d.total_approved_requests }}/{{ d.total_requests }}</div>
+      <div class="sub">Approved across all modules</div>
     </div>
-    <div class="kpi" style="--accent:#1abc9c">
+    <div class="kpi" style="--accent:#082f63">
       <div class="label">Total Spend</div>
       <div class="value" style="font-size:20px">₦{{ "{:,.0f}".format(d.total_spend) }}</div>
       <div class="sub">CA + EC + RTPS</div>
       <div class="amount-breakdown">
         <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
         <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
-        <div><span>Unclassified</span><strong>₦{{ "{:,.0f}".format(d.unclassified_spend) }}</strong></div>
       </div>
     </div>
   </div>
@@ -799,7 +868,7 @@ TEMPLATE = """
           <td>
             <div class="rate-bar">
               <div class="rate-fill" style="width:{{ rate }}%;
-                background:{% if rate >= 75 %}#27ae60{% elif rate >= 50 %}#f39c12{% else %}#e74c3c{% endif %}">
+                background:{% if rate >= 75 %}#1155cc{% elif rate >= 50 %}#4c93ff{% else %}#8fc3ff{% endif %}">
               </div>
             </div>
           </td>
@@ -812,6 +881,93 @@ TEMPLATE = """
 </div>
 
 <div class="footer">IGEZ Analytics Dashboard · Data live from MongoDB Atlas</div>
+<script>
+  const periodFilter = document.getElementById("periodFilter");
+  const filterForm = document.getElementById("filterForm");
+  const applyFilters = document.getElementById("applyFilters");
+  const filterHint = document.getElementById("filterHint");
+  const startDateHint = document.getElementById("startDateHint");
+  const endDateHint = document.getElementById("endDateHint");
+  const periodDisabledValue = "date_active";
+  const cancelPeriodValue = "cancel_period";
+  let previousPeriodValue = periodFilter.value === periodDisabledValue ? "all" : periodFilter.value;
+  const dateFilters = [
+    document.getElementById("startDateFilter"),
+    document.getElementById("endDateFilter")
+  ];
+
+  function getDisabledPeriodOption() {
+    let option = periodFilter.querySelector(`option[value="${periodDisabledValue}"]`);
+    if (!option) {
+      option = new Option("🚫 Date range active", periodDisabledValue);
+      periodFilter.insertBefore(option, periodFilter.firstChild);
+    }
+    return option;
+  }
+
+  function syncPeriodFilter() {
+    if (periodFilter.value === cancelPeriodValue) {
+      previousPeriodValue = "all";
+      periodFilter.value = "all";
+    }
+    const dateSelectionActive = dateFilters.some((input) => input.dataset.dateValue);
+    const dateRangeIncomplete = dateFilters.filter((input) => input.dataset.dateValue).length === 1;
+    const dateRangeInvalid = dateFilters.every((input) => input.dataset.dateValue)
+      && dateFilters[0].dataset.dateValue > dateFilters[1].dataset.dateValue;
+    const periodFilterActive = periodFilter.value !== "all" && periodFilter.value !== periodDisabledValue;
+    if (dateSelectionActive && periodFilter.value !== periodDisabledValue) {
+      previousPeriodValue = periodFilter.value;
+    }
+    periodFilter.disabled = dateSelectionActive;
+    if (dateSelectionActive) {
+      getDisabledPeriodOption().selected = true;
+      periodFilter.classList.add("period-disabled");
+    } else {
+      const disabledOption = periodFilter.querySelector(`option[value="${periodDisabledValue}"]`);
+      if (disabledOption) disabledOption.remove();
+      periodFilter.classList.remove("period-disabled");
+      periodFilter.value = previousPeriodValue;
+    }
+    dateFilters.forEach((input) => {
+      input.disabled = periodFilterActive;
+      if (periodFilterActive) {
+        input.type = "text";
+        input.value = "Period active";
+      } else {
+        input.type = "date";
+        input.value = input.dataset.dateValue;
+      }
+    });
+    startDateHint.textContent = "";
+    endDateHint.textContent = "";
+    if (dateRangeInvalid) {
+      filterHint.textContent = "From date cannot be later than To date.";
+    } else if (dateRangeIncomplete) {
+      filterHint.textContent = "Select both From and To dates before applying.";
+    } else {
+      filterHint.textContent = "";
+    }
+    applyFilters.disabled = dateRangeIncomplete || dateRangeInvalid;
+  }
+
+  dateFilters.forEach((input) => input.addEventListener("input", () => {
+    input.dataset.dateValue = input.value;
+    syncPeriodFilter();
+  }));
+  periodFilter.addEventListener("change", () => {
+    if (periodFilter.value !== "all" && periodFilter.value !== periodDisabledValue && periodFilter.value !== cancelPeriodValue) {
+      previousPeriodValue = periodFilter.value;
+      dateFilters.forEach((input) => {
+        input.dataset.dateValue = "";
+        input.value = "";
+      });
+    } else if (periodFilter.value === "all") {
+      previousPeriodValue = "all";
+    }
+    syncPeriodFilter();
+  });
+  syncPeriodFilter();
+</script>
 </body>
 </html>
 """
@@ -869,17 +1025,32 @@ def dashboard():
             now=now,
         ), 500
 
-    period = request.args.get("period", "all")
-    start_date = parse_date_arg(request.args.get("start"))
-    end_date = parse_date_arg(request.args.get("end"))
+    requested_period = request.args.get("period", "all")
+    if requested_period not in {"all", "today", "week", "month", "quarter", "year", "date_active"}:
+        requested_period = "all"
+    raw_start = request.args.get("start", "")
+    raw_end = request.args.get("end", "")
+    start_date = parse_date_arg(raw_start)
+    end_date = parse_date_arg(raw_end)
+    date_selection_active = bool(raw_start or raw_end)
+    date_range_complete = bool(start_date and end_date)
+    date_range_invalid = bool(date_range_complete and start_date > end_date)
+    date_range_valid = date_range_complete and not date_range_invalid
+    date_range_incomplete = date_selection_active and not date_range_complete
+    period = "all" if date_selection_active else requested_period
+    period_filter_active = period not in ("all", "date_active")
     period_start, period_end = period_bounds(period)
     filters = {
         "period": period,
-        "start": request.args.get("start", ""),
-        "end": request.args.get("end", ""),
-        "start_date": start_date or period_start,
-        "end_date": (end_date + timedelta(days=1)) if end_date else period_end,
+        "start": raw_start,
+        "end": raw_end,
+        "start_date": start_date if date_range_valid else period_start,
+        "end_date": (end_date + timedelta(days=1)) if date_range_valid else period_end,
         "subsidiary": request.args.get("subsidiary", "All"),
+        "date_selection_active": date_selection_active,
+        "date_range_incomplete": date_range_incomplete,
+        "date_range_invalid": date_range_invalid,
+        "period_filter_active": period_filter_active,
     }
     sub_options = sorted(set(sub_map.values()))
     try:
@@ -891,10 +1062,10 @@ def dashboard():
             now=now,
         ), 500
 
-    BLUE   = "#3498db"
-    ORANGE = "#e67e22"
-    PURPLE = "#9b59b6"
-    GREEN  = "#27ae60"
+    BLUE = "#1155cc"
+    BLUE_LIGHT = "#1d6ff2"
+    BLUE_SOFT = "#4c93ff"
+    BLUE_DEEP = "#0b3a75"
 
     charts = {}
 
@@ -915,38 +1086,38 @@ def dashboard():
     # Cash Advance
     charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()),
                                 list(d["ca_by_sub"].values()),
-                                "Cash Advance Amount by Subsidiary (₦)", ORANGE)
-    charts["ca_status"]  = pie(["Approved","Pending","Unclassified"],
-                                [d["ca_approved"], d["ca_pending"], d["ca_unclassified"]],
+                                "Cash Advance Amount by Subsidiary (₦)", BLUE_LIGHT)
+    charts["ca_status"]  = pie(["Approved","Pending"],
+                                [d["ca_approved"], d["ca_pending"]],
                                 "Cash Advance Status")
     charts["ca_trend"]   = line(list(d["ca_by_month"].keys()),
                                  list(d["ca_by_month"].values()),
-                                 "Cash Advance — Monthly Trend (₦)", ORANGE)
+                                 "Cash Advance — Monthly Trend (₦)", BLUE_LIGHT)
 
     # Expense Claims
     charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()),
                                 list(d["ec_by_sub"].values()),
-                                "Expense Claims Amount by Subsidiary (₦)", PURPLE)
-    charts["ec_status"]  = pie(["Approved","Pending","Unclassified"],
-                                [d["ec_approved"], d["ec_pending"], d["ec_unclassified"]],
+                                "Expense Claims Amount by Subsidiary (₦)", BLUE_SOFT)
+    charts["ec_status"]  = pie(["Approved","Pending"],
+                                [d["ec_approved"], d["ec_pending"]],
                                 "Expense Claim Status")
     charts["ec_trend"]   = line(list(d["ec_by_month"].keys()),
                                  list(d["ec_by_month"].values()),
-                                 "Expense Claims — Monthly Trend (₦)", PURPLE)
+                                 "Expense Claims — Monthly Trend (₦)", BLUE_SOFT)
 
     # RTPS
     charts["rtps_by_sub"]   = bar(list(d["rtps_by_sub"].keys()),
                                    list(d["rtps_by_sub"].values()),
-                                   "RTPS Amount by Subsidiary (₦)", GREEN)
+                                   "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
     charts["rtps_by_mode"]  = pie(list(d["rtps_by_mode"].keys()),
                                    list(d["rtps_by_mode"].values()),
                                    "Payment Mode")
     charts["rtps_suppliers"]= hbar(list(d["rtps_by_supplier"].values()),
                                     list(d["rtps_by_supplier"].keys()),
-                                    "Top 10 Suppliers by Amount (₦)", GREEN)
+                                    "Top 10 Suppliers by Amount (₦)", BLUE_DEEP)
     charts["rtps_trend"]    = line(list(d["rtps_by_month"].keys()),
                                     list(d["rtps_by_month"].values()),
-                                    "RTPS — Monthly Trend (₦)", GREEN)
+                                    "RTPS — Monthly Trend (₦)", BLUE_DEEP)
 
     return render_template_string(
         TEMPLATE, d=d, charts=charts, now=now, filters=filters, sub_options=sub_options
