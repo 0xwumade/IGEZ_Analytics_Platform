@@ -26,6 +26,7 @@ app = Flask(__name__)
 DB_URL = os.getenv("DATABASE_URL")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Africa/Lagos")
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
+UTC_TZ = ZoneInfo("UTC")
 
 # DB helpers and data processing functions for the dashboard analytics
 
@@ -76,13 +77,22 @@ def status_group(record):
 
 
 def month_label(dt):
-    if isinstance(dt, datetime):
-        return dt.strftime("%Y-%m")
+    local_dt = to_local_time(dt)
+    if local_dt:
+        return local_dt.strftime("%Y-%m")
     return "Unknown"
 
 
 def app_now():
     return datetime.now(LOCAL_TZ).replace(tzinfo=None)
+
+
+def to_local_time(dt):
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_TZ)
+    return dt.astimezone(LOCAL_TZ).replace(tzinfo=None)
 
 
 def parse_date_arg(value):
@@ -111,7 +121,7 @@ def period_bounds(period):
 
 def record_date(record):
     dt = record.get("createdAt")
-    return dt if isinstance(dt, datetime) else None
+    return to_local_time(dt)
 
 
 def previous_month_bounds():
@@ -316,7 +326,7 @@ def load_all(db, sub_map, filters=None):
         return field.replace("_Approved", "").replace("_Rejected", "").replace("_", " ")
 
     def add_activity(events, record, module, title, amount, field, action, accent):
-        event_time = record.get(field)
+        event_time = to_local_time(record.get(field))
         if not isinstance(event_time, datetime) or not event_date_matches(event_time):
             return
         events.append({
@@ -470,6 +480,7 @@ def load_all(db, sub_map, filters=None):
             if bucket not in aging_summary:
                 aging_summary[bucket] = {"label": bucket, "count": 0, "amount": 0.0, "modules": defaultdict(int)}
             amount = amount_fn(record)
+            created = record_date(record)
             aging_summary[bucket]["count"] += 1
             aging_summary[bucket]["amount"] += amount
             aging_summary[bucket]["modules"][module] += 1
@@ -477,7 +488,7 @@ def load_all(db, sub_map, filters=None):
                 "module": module,
                 "title": short_text(title_fn(record), 72),
                 "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
-                "created": record.get("createdAt").strftime("%d %b %Y") if isinstance(record.get("createdAt"), datetime) else "Unknown",
+                "created": created.strftime("%d %b %Y") if created else "Unknown",
                 "days": days if days is not None else 0,
                 "amount": format_money(amount),
                 "amount_value": amount,
@@ -553,6 +564,10 @@ def load_all(db, sub_map, filters=None):
     rejection_by_sub = defaultdict(int)
     for module, records, amount_fn in analytics_sources:
         rejected_records = [r for r in records if is_rejected(r)]
+        rejected_count = len(rejected_records)
+        rejected_amount = sum(amount_fn(r) for r in rejected_records)
+        metric_label = f"{rejected_count} request{'s' if rejected_count != 1 else ''}" if module == "Leave" else format_money(rejected_amount) or "₦0"
+        metric_type = "Count" if module == "Leave" else "Value"
         for r in rejected_records:
             rejection_by_sub[resolve_sub(r.get("subsidiary_id", ""), sub_map)] += 1
             for stage, field in rejection_event_fields:
@@ -560,10 +575,12 @@ def load_all(db, sub_map, filters=None):
                     rejection_by_stage[f"{stage} - {module}"] += 1
         rejection_rows.append({
             "module": module,
-            "count": len(rejected_records),
-            "rate": round(len(rejected_records) / len(records) * 100, 1) if records else 0,
-            "amount": sum(amount_fn(r) for r in rejected_records),
-            "amount_label": format_money(sum(amount_fn(r) for r in rejected_records)) or "₦0",
+            "count": rejected_count,
+            "rate": round(rejected_count / len(records) * 100, 1) if records else 0,
+            "amount": rejected_amount,
+            "amount_label": format_money(rejected_amount) or "₦0",
+            "metric_label": metric_label,
+            "metric_type": metric_type,
         })
     data["rejection_analytics"] = rejection_rows
     data["rejection_hotspots"] = sorted(
@@ -883,14 +900,20 @@ def load_all(db, sub_map, filters=None):
     scorecards = []
     for sub in sorted(set(list(spend_by_sub.keys()) + list(sub_map.values()))):
         sub_pending_items = [item for item in pending_items if item["subsidiary"] == sub]
+        spend = spend_by_sub.get(sub, 0)
+        pending_amount = sum(item["amount_value"] for item in sub_pending_items)
+        pending_count = len(sub_pending_items)
+        oldest_days = max((item["days"] for item in sub_pending_items), default=0)
+        if not any((spend, pending_amount, pending_count, oldest_days)):
+            continue
         scorecards.append({
             "subsidiary": sub,
-            "spend": spend_by_sub.get(sub, 0),
-            "spend_label": format_money(spend_by_sub.get(sub, 0)) or "₦0",
-            "pending_count": len(sub_pending_items),
-            "pending_amount": sum(item["amount_value"] for item in sub_pending_items),
-            "pending_label": format_money(sum(item["amount_value"] for item in sub_pending_items)) or "₦0",
-            "oldest_days": max((item["days"] for item in sub_pending_items), default=0),
+            "spend": spend,
+            "spend_label": format_money(spend) or "₦0",
+            "pending_count": pending_count,
+            "pending_amount": pending_amount,
+            "pending_label": format_money(pending_amount) or "₦0",
+            "oldest_days": oldest_days,
         })
     data["subsidiary_scorecards"] = sorted(
         scorecards,
@@ -1450,12 +1473,16 @@ TEMPLATE = """
     <div class="exec-card">
       <h3>Subsidiary Scorecards</h3>
       <div class="scorecard-list">
+        {% if d.subsidiary_scorecards %}
         {% for item in d.subsidiary_scorecards %}
         <div class="scorecard-item">
           <strong>{{ item.subsidiary }}</strong>
           <span>{{ item.spend_label }} total spend - {{ item.pending_label }} waiting - {{ item.pending_count }} pending - oldest {{ item.oldest_days }} days</span>
         </div>
         {% endfor %}
+        {% else %}
+        <div class="scorecard-item"><strong>No active subsidiaries</strong><span>No subsidiary has spend or pending activity in this view.</span></div>
+        {% endif %}
       </div>
     </div>
     <div class="exec-card">
@@ -1500,10 +1527,10 @@ TEMPLATE = """
     <div class="exec-card">
       <h3>Rejection Analytics</h3>
       <table class="compact-table">
-        <thead><tr><th>Module</th><th>Rate</th><th>Value</th></tr></thead>
+        <thead><tr><th>Module</th><th>Rate</th><th>Rejected Count / Value</th></tr></thead>
         <tbody>
           {% for row in d.rejection_analytics %}
-          <tr><td>{{ row.module }}</td><td>{{ row.rate }}%</td><td>{{ row.amount_label }}</td></tr>
+          <tr><td>{{ row.module }}</td><td>{{ row.rate }}%</td><td>{{ row.metric_label }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -1992,8 +2019,9 @@ def build_executive_pdf(d, filters, now):
 
     story.append(Paragraph("Rejection Analytics", section))
     for item in d["rejection_analytics"]:
+        metric_note = "rejected requests" if item["metric_type"] == "Count" else "rejected value"
         story.append(Paragraph(
-            f"- {pdf_text(item['module'])}: {item['rate']}% rejected; {pdf_text(item['amount_label'])} rejected value.",
+            f"- {pdf_text(item['module'])}: {item['rate']}% rejected; {pdf_text(item['metric_label'])} {metric_note}.",
             body,
         ))
 
