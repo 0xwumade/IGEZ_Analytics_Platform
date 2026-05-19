@@ -134,7 +134,7 @@ def format_change(value):
 
 
 def format_money(value):
-    return f"NGN {value:,.0f}" if value else ""
+    return f"₦{value:,.0f}" if value else ""
 
 # Data loaders and analytics computations for the dashboard
 
@@ -492,7 +492,7 @@ def load_all(db, sub_map, filters=None):
             "label": label,
             "count": row["count"],
             "amount": row["amount"],
-            "amount_label": format_money(row["amount"]) or "NGN 0",
+            "amount_label": format_money(row["amount"]) or "₦0",
             "leave": row["modules"]["Leave"],
             "cash_advance": row["modules"]["Cash Advance"],
             "expense_claim": row["modules"]["Expense Claim"],
@@ -563,7 +563,7 @@ def load_all(db, sub_map, filters=None):
             "count": len(rejected_records),
             "rate": round(len(rejected_records) / len(records) * 100, 1) if records else 0,
             "amount": sum(amount_fn(r) for r in rejected_records),
-            "amount_label": format_money(sum(amount_fn(r) for r in rejected_records)) or "NGN 0",
+            "amount_label": format_money(sum(amount_fn(r) for r in rejected_records)) or "₦0",
         })
     data["rejection_analytics"] = rejection_rows
     data["rejection_hotspots"] = sorted(
@@ -604,7 +604,7 @@ def load_all(db, sub_map, filters=None):
                 "name": name,
                 "count": row["count"],
                 "amount": row["amount"],
-                "amount_label": format_money(row["amount"]) or "NGN 0",
+                "amount_label": format_money(row["amount"]) or "₦0",
                 "pending": row["pending"],
                 "rejected": row["rejected"],
                 "main_module": max(row["modules"].items(), key=lambda item: item[1])[0] if row["modules"] else "Unknown",
@@ -640,7 +640,7 @@ def load_all(db, sub_map, filters=None):
             "owner": normalize_cbc_text(owner.title()),
             "count": len(records),
             "amount": amount,
-            "amount_label": format_money(amount) or "NGN 0",
+            "amount_label": format_money(amount) or "₦0",
             "month": month,
             "reason": f"{len(records)} requests with same owner and amount in {month}; {days_span} days apart.",
         })
@@ -663,9 +663,9 @@ def load_all(db, sub_map, filters=None):
     data["month_end_close"] = {
         "days_left": days_to_month_end,
         "pending_value": close_pending_spend,
-        "pending_label": format_money(close_pending_spend) or "NGN 0",
-        "approved_label": format_money(close_month_spend) or "NGN 0",
-        "unclassified_label": format_money(close_unclassified_spend) or "NGN 0",
+        "pending_label": format_money(close_pending_spend) or "₦0",
+        "approved_label": format_money(close_month_spend) or "₦0",
+        "unclassified_label": format_money(close_unclassified_spend) or "₦0",
         "blockers": len([item for item in pending_items if item["days"] >= 8]),
     }
 
@@ -772,9 +772,9 @@ def load_all(db, sub_map, filters=None):
             "label": label,
             "count": count,
             "amount": amount,
-            "amount_label": format_money(amount) or "NGN 0",
+            "amount_label": format_money(amount) or "₦0",
             "avg_days": avg_days,
-            "impact": f"{count} requests, {format_money(amount) or 'NGN 0'} waiting, {avg_days} avg days",
+            "impact": f"{count} requests, {format_money(amount) or '₦0'} waiting, {avg_days} avg days",
         }
 
     bottlenecks = [
@@ -856,7 +856,7 @@ def load_all(db, sub_map, filters=None):
     data_quality_warnings = []
     if unclassified_spend:
         data_quality_warnings.append(
-            f"Unclassified finance requests total NGN {unclassified_spend:,.0f}; totals may shift after statuses are cleaned."
+            f"Unclassified finance requests total ₦{unclassified_spend:,.0f}; totals may shift after statuses are cleaned."
         )
     if data["ca_unclassified"] or data["ec_unclassified"] or data["rtps_unclassified"]:
         data_quality_warnings.append(
@@ -886,10 +886,10 @@ def load_all(db, sub_map, filters=None):
         scorecards.append({
             "subsidiary": sub,
             "spend": spend_by_sub.get(sub, 0),
-            "spend_label": format_money(spend_by_sub.get(sub, 0)) or "NGN 0",
+            "spend_label": format_money(spend_by_sub.get(sub, 0)) or "₦0",
             "pending_count": len(sub_pending_items),
             "pending_amount": sum(item["amount_value"] for item in sub_pending_items),
-            "pending_label": format_money(sum(item["amount_value"] for item in sub_pending_items)) or "NGN 0",
+            "pending_label": format_money(sum(item["amount_value"] for item in sub_pending_items)) or "₦0",
             "oldest_days": max((item["days"] for item in sub_pending_items), default=0),
         })
     data["subsidiary_scorecards"] = sorted(
@@ -909,10 +909,10 @@ def load_all(db, sub_map, filters=None):
 
     data["insights"] = [
         f"Platform health is {health_status}: {health_tone}",
-        f"{highest_pending_module} has the highest waiting approval spend at NGN {highest_pending_amount:,.0f}.",
-        f"{top_sub} is the highest spending subsidiary in this view at NGN {top_sub_amount:,.0f}.",
+        f"{highest_pending_module} has the highest waiting approval spend at ₦{highest_pending_amount:,.0f}.",
+        f"{top_sub} is the highest spending subsidiary in this view at ₦{top_sub_amount:,.0f}.",
         f"{lowest_approval_label} currently has the lowest approval rate at {lowest_approval_rate}%.",
-        f"Waiting approval spend is NGN {data['pending_spend']:,.0f} across active requests.",
+        f"Waiting approval spend is ₦{data['pending_spend']:,.0f} across active requests.",
     ]
 
     return data
@@ -962,14 +962,20 @@ def pie(labels, values, title):
 
 
 def line(x, y, title, color="#1155cc"):
+    values = [float(v or 0) for v in y]
+    max_value = max(values, default=0)
+    y_range = [0, max(max_value * 1.2, 1)]
+    has_multiple_points = len(x) > 1
     fig = go.Figure(go.Scatter(
-        x=x, y=y, mode="lines+markers",
-        fill="tozeroy",
+        x=x, y=values, mode="lines+markers" if has_multiple_points else "markers",
+        fill="tozeroy" if has_multiple_points else None,
         fillcolor="rgba(76,147,255,0.18)",
-        line=dict(color=color, width=3, shape="spline"),
+        line=dict(color=color, width=3, shape="spline" if len(x) > 2 else "linear"),
         marker=dict(size=7, color="#ffffff", line=dict(color=color, width=2))
     ))
     chart_layout(fig, title, 300, dict(t=50, b=40, l=40, r=20))
+    fig.update_xaxes(type="category")
+    fig.update_yaxes(range=y_range, rangemode="tozero")
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
@@ -977,7 +983,7 @@ def hbar(x, y, title, color="#1155cc"):
     fig = go.Figure(go.Bar(
         x=x, y=y, orientation="h",
         marker=dict(color=blue_scale(len(x)), line=dict(color="rgba(255,255,255,0.75)", width=1)),
-        text=[f"â‚¦{v:,.0f}" for v in x],
+        text=[f"₦{v:,.0f}" for v in x],
         textposition="outside"
     ))
     chart_layout(fig, title, 340, dict(t=50, b=20, l=120, r=60), font_size=10)
@@ -1292,7 +1298,7 @@ TEMPLATE = """
 <div class="header">
   <div>
     <div class="h1">IGEZ - Analytics Dashboard</div>
-    <div class="sub">Live data from MongoDB · Last refreshed: {{ now }}</div>
+    <div class="sub">Live data from MongoDB - Last refreshed: {{ now }}</div>
   </div>
   <a href="/" class="refresh-btn">Refresh</a>
 </div>
@@ -1342,17 +1348,17 @@ TEMPLATE = """
     <div class="signal-grid">
       <div class="signal" style="--accent:#1155cc">
         <div class="label">Approved Spend</div>
-        <div class="value">NGN {{ "{:,.0f}".format(d.approved_spend) }}</div>
+        <div class="value">₦{{ "{:,.0f}".format(d.approved_spend) }}</div>
         <div class="sub">Cleared across CA, EC and RTPS</div>
       </div>
       <div class="signal" style="--accent:#1d6ff2">
         <div class="label">Waiting Approval</div>
-        <div class="value">NGN {{ "{:,.0f}".format(d.pending_spend) }}</div>
+        <div class="value">₦{{ "{:,.0f}".format(d.pending_spend) }}</div>
         <div class="sub">{{ d.highest_pending_module }} is the largest queue</div>
       </div>
       <div class="signal" style="--accent:#4c93ff">
         <div class="label">This Month</div>
-        <div class="value">NGN {{ "{:,.0f}".format(d.month_compare.spend) }}</div>
+        <div class="value">₦{{ "{:,.0f}".format(d.month_compare.spend) }}</div>
         <div class="sub">Spend {{ d.month_compare.spend_change }} vs last month</div>
       </div>
       <div class="signal" style="--accent:#0b3a75">
@@ -1363,7 +1369,7 @@ TEMPLATE = """
       <div class="signal" style="--accent:#8fc3ff">
         <div class="label">Top Subsidiary</div>
         <div class="value">{{ d.top_spending_subsidiary }}</div>
-        <div class="sub">NGN {{ "{:,.0f}".format(d.top_spending_subsidiary_amount) }}</div>
+        <div class="sub">₦{{ "{:,.0f}".format(d.top_spending_subsidiary_amount) }}</div>
       </div>
       <div class="signal" style="--accent:#082f63">
         <div class="label">Approval Watch</div>
@@ -1416,7 +1422,7 @@ TEMPLATE = """
           <div class="priority">Priority<strong>{{ loop.index }}</strong></div>
           <div>
             <div class="action-title">{{ item.title }}</div>
-            <div class="action-meta">{{ item.module }} · {{ item.subsidiary }} · {{ item.why }}</div>
+            <div class="action-meta">{{ item.module }} - {{ item.subsidiary }} - {{ item.why }}</div>
             {% if item.description %}<div class="action-meta">{{ item.description }}</div>{% endif %}
           </div>
           <div class="action-side">
@@ -1447,7 +1453,7 @@ TEMPLATE = """
         {% for item in d.subsidiary_scorecards %}
         <div class="scorecard-item">
           <strong>{{ item.subsidiary }}</strong>
-          <span>{{ item.spend_label }} total spend · {{ item.pending_label }} waiting · {{ item.pending_count }} pending · oldest {{ item.oldest_days }} days</span>
+          <span>{{ item.spend_label }} total spend - {{ item.pending_label }} waiting - {{ item.pending_count }} pending - oldest {{ item.oldest_days }} days</span>
         </div>
         {% endfor %}
       </div>
@@ -1528,7 +1534,7 @@ TEMPLATE = """
       <div class="simple-list">
         {% if d.suspicious_requests %}
           {% for item in d.suspicious_requests %}
-          <div class="warning-item"><strong>{{ item.owner }} · {{ item.amount_label }}</strong><span>{{ item.module }} · {{ item.reason }}</span></div>
+          <div class="warning-item"><strong>{{ item.owner }} - {{ item.amount_label }}</strong><span>{{ item.module }} - {{ item.reason }}</span></div>
           {% endfor %}
         {% else %}
           <div class="warning-item"><strong>Clean</strong><span>No same-owner, same-amount repeat requests detected for the selected period.</span></div>
@@ -1582,7 +1588,7 @@ TEMPLATE = """
     {% endif %}
   </div>
 
-  <!-- â”€â”€ PENDING APPROVAL AGING â”€â”€ -->
+  <!-- Pending approval aging -->
   <div class="section-title">Pending Approval Aging</div>
   <div class="aging-grid">
     <div class="aging-card">
@@ -1595,7 +1601,7 @@ TEMPLATE = """
             <div class="aging-bar"><div class="aging-fill" style="width:{{ row.share }}%"></div></div>
             <div class="aging-amount">{{ row.amount_label }}</div>
           </div>
-          <div class="aging-count">{{ row.count }} · {{ row.share }}%</div>
+          <div class="aging-count">{{ row.count }} - {{ row.share }}%</div>
         </div>
         <div class="aging-module-grid">
           <div class="aging-module"><span>Leave</span><strong>{{ row.leave }}</strong></div>
@@ -1607,14 +1613,14 @@ TEMPLATE = """
       </div>
     </div>
     <div class="aging-card">
-      <h3>Oldest pending requests{% if d.oldest_pending_days %} · {{ d.oldest_pending_days }} days max{% endif %}</h3>
+      <h3>Oldest pending requests{% if d.oldest_pending_days %} - {{ d.oldest_pending_days }} days max{% endif %}</h3>
       {% if d.oldest_pending %}
       <div class="oldest-list">
         {% for item in d.oldest_pending %}
         <div class="oldest-item">
           <div class="oldest-age">{{ item.days }}<span>days</span></div>
           <div class="oldest-main">
-            <div class="oldest-meta">{{ item.module }} · {{ item.created }}</div>
+            <div class="oldest-meta">{{ item.module }} - {{ item.created }}</div>
             <div class="oldest-title">{{ item.title }}</div>
             {% if item.description %}<div class="oldest-desc">{{ item.description }}</div>{% endif %}
           </div>
@@ -1632,39 +1638,39 @@ TEMPLATE = """
     </div>
   </div>
 
-  <!-- â”€â”€ KPI OVERVIEW â”€â”€ -->
+  <!-- KPI overview -->
   <div class="section-title">Overview</div>
   <div class="kpi-grid">
     <div class="kpi" style="--accent:#1155cc">
       <div class="label">Leave Requests</div>
       <div class="value">{{ d.leave_approved }}/{{ d.leave_total }}</div>
-      <div class="sub">{{ d.leave_approved }} approved · {{ d.leave_pending }} pending</div>
+      <div class="sub">{{ d.leave_approved }} approved - {{ d.leave_pending }} pending</div>
     </div>
     <div class="kpi" style="--accent:#1d6ff2">
       <div class="label">Cash Advances</div>
       <div class="value">{{ d.ca_approved }}/{{ d.ca_total }}</div>
-      <div class="sub">â‚¦{{ "{:,.0f}".format(d.ca_amount) }} total</div>
+      <div class="sub">₦{{ "{:,.0f}".format(d.ca_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#4c93ff">
       <div class="label">Expense Claims</div>
       <div class="value">{{ d.ec_approved }}/{{ d.ec_total }}</div>
-      <div class="sub">â‚¦{{ "{:,.0f}".format(d.ec_amount) }} total</div>
+      <div class="sub">₦{{ "{:,.0f}".format(d.ec_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#0b3a75">
       <div class="label">RTPS</div>
       <div class="value">{{ d.rtps_approved }}/{{ d.rtps_total }}</div>
-      <div class="sub">â‚¦{{ "{:,.0f}".format(d.rtps_amount) }} total</div>
+      <div class="sub">₦{{ "{:,.0f}".format(d.rtps_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#8fc3ff">
@@ -1674,16 +1680,16 @@ TEMPLATE = """
     </div>
     <div class="kpi" style="--accent:#082f63">
       <div class="label">Total Spend</div>
-      <div class="value" style="font-size:20px">â‚¦{{ "{:,.0f}".format(d.total_spend) }}</div>
+      <div class="value" style="font-size:20px">₦{{ "{:,.0f}".format(d.total_spend) }}</div>
       <div class="sub">CA + EC + RTPS</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
       </div>
     </div>
   </div>
 
-  <!-- â”€â”€ LEAVE REQUESTS â”€â”€ -->
+  <!-- Leave requests -->
   <div class="section-title">Leave Requests</div>
   <div class="chart-grid-3">
     <div class="chart-card">{{ charts.leave_by_sub | safe }}</div>
@@ -1694,7 +1700,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.leave_trend | safe }}</div>
   </div>
 
-  <!-- â”€â”€ CASH ADVANCE â”€â”€ -->
+  <!-- Cash advance -->
   <div class="section-title">Cash Advance</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.ca_by_sub | safe }}</div>
@@ -1704,7 +1710,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.ca_trend | safe }}</div>
   </div>
 
-  <!-- â”€â”€ EXPENSE CLAIMS â”€â”€ -->
+  <!-- Expense claims -->
   <div class="section-title">Expense Claims</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.ec_by_sub | safe }}</div>
@@ -1714,7 +1720,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.ec_trend | safe }}</div>
   </div>
 
-  <!-- â”€â”€ RTPS â”€â”€ -->
+  <!-- RTPS -->
   <div class="section-title">Request to Pay Supplier (RTPS)</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.rtps_by_sub | safe }}</div>
@@ -1725,7 +1731,7 @@ TEMPLATE = """
     <div class="chart-card">{{ charts.rtps_trend | safe }}</div>
   </div>
 
-  <!-- â”€â”€ APPROVAL RATES â”€â”€ -->
+  <!-- Approval rates -->
   <div class="section-title">Approval Rates</div>
   <div class="chart-card">
     <table class="approval-table">
@@ -1752,7 +1758,7 @@ TEMPLATE = """
 
 </div>
 
-<div class="footer">IGEZ Analytics Dashboard · Data live from MongoDB Atlas</div>
+<div class="footer">IGEZ Analytics Dashboard - Data live from MongoDB Atlas</div>
 <script>
   const periodFilter = document.getElementById("periodFilter");
   const filterForm = document.getElementById("filterForm");
@@ -1882,7 +1888,7 @@ ERROR_TEMPLATE = """
 </html>
 """
 
-# â”€â”€ Route â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Route ---------------------------------------------------------------------
 
 def dashboard_payload():
     now = app_now().strftime("%d %b %Y, %H:%M")
@@ -1946,9 +1952,9 @@ def build_executive_pdf(d, filters, now):
     ]
     kpis = [
         ["Health", f"{d['health']['status']} ({d['health']['score']}/100)"],
-        ["Approved Spend", f"NGN {d['approved_spend']:,.0f}"],
-        ["Waiting Approval", f"NGN {d['pending_spend']:,.0f}"],
-        ["This Month Spend", f"NGN {d['month_compare']['spend']:,.0f}"],
+        ["Approved Spend", f"₦{d['approved_spend']:,.0f}"],
+        ["Waiting Approval", f"₦{d['pending_spend']:,.0f}"],
+        ["This Month Spend", f"₦{d['month_compare']['spend']:,.0f}"],
         ["Total Requests", f"{d['total_approved_requests']}/{d['total_requests']} approved"],
         ["Oldest Pending", f"{d['oldest_pending_days']} days"],
     ]
@@ -2056,43 +2062,43 @@ def dashboard():
                                    "Leave Status")
     charts["leave_trend"]   = line(list(d["leave_by_month"].keys()),
                                     list(d["leave_by_month"].values()),
-                                    "Leave Requests â€” Monthly Trend", BLUE)
+                                    "Leave Requests - Monthly Trend", BLUE)
 
     # Cash Advance
     charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()),
                                 list(d["ca_by_sub"].values()),
-                                "Cash Advance Amount by Subsidiary (â‚¦)", BLUE_LIGHT)
+                                "Cash Advance Amount by Subsidiary (₦)", BLUE_LIGHT)
     charts["ca_status"]  = pie(["Approved","Pending"],
                                 [d["ca_approved"], d["ca_pending"]],
                                 "Cash Advance Status")
     charts["ca_trend"]   = line(list(d["ca_by_month"].keys()),
                                  list(d["ca_by_month"].values()),
-                                 "Cash Advance â€” Monthly Trend (â‚¦)", BLUE_LIGHT)
+                                 "Cash Advance - Monthly Trend (₦)", BLUE_LIGHT)
 
     # Expense Claims
     charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()),
                                 list(d["ec_by_sub"].values()),
-                                "Expense Claims Amount by Subsidiary (â‚¦)", BLUE_SOFT)
+                                "Expense Claims Amount by Subsidiary (₦)", BLUE_SOFT)
     charts["ec_status"]  = pie(["Approved","Pending"],
                                 [d["ec_approved"], d["ec_pending"]],
                                 "Expense Claim Status")
     charts["ec_trend"]   = line(list(d["ec_by_month"].keys()),
                                  list(d["ec_by_month"].values()),
-                                 "Expense Claims â€” Monthly Trend (â‚¦)", BLUE_SOFT)
+                                 "Expense Claims - Monthly Trend (₦)", BLUE_SOFT)
 
     # RTPS
     charts["rtps_by_sub"]   = bar(list(d["rtps_by_sub"].keys()),
                                    list(d["rtps_by_sub"].values()),
-                                   "RTPS Amount by Subsidiary (â‚¦)", BLUE_DEEP)
+                                   "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
     charts["rtps_by_mode"]  = pie(list(d["rtps_by_mode"].keys()),
                                    list(d["rtps_by_mode"].values()),
                                    "Payment Mode")
     charts["rtps_suppliers"]= hbar(list(d["rtps_by_supplier"].values()),
                                     list(d["rtps_by_supplier"].keys()),
-                                    "Top 10 Suppliers by Amount (â‚¦)", BLUE_DEEP)
+                                    "Top 10 Suppliers by Amount (₦)", BLUE_DEEP)
     charts["rtps_trend"]    = line(list(d["rtps_by_month"].keys()),
                                     list(d["rtps_by_month"].values()),
-                                    "RTPS â€” Monthly Trend (â‚¦)", BLUE_DEEP)
+                                    "RTPS - Monthly Trend (₦)", BLUE_DEEP)
 
     return render_template_string(
         TEMPLATE,
