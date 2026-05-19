@@ -14,7 +14,7 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import ConfigurationError, PyMongoError, ServerSelectionTimeoutError
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, send_file
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -27,7 +27,7 @@ DB_URL = os.getenv("DATABASE_URL")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Africa/Lagos")
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# DB helpers and data processing functions for the dashboard analytics
 
 def get_db():
     if not DB_URL:
@@ -48,8 +48,12 @@ def get_subsidiary_map(db):
     }
 
 
+def normalize_cbc_text(value):
+    return re.sub(r"\bCbc\b", "CBC", str(value or ""))
+
+
 def resolve_sub(sub_id, sub_map):
-    return sub_map.get(str(sub_id), "Unknown")
+    return normalize_cbc_text(sub_map.get(str(sub_id), "Unknown"))
 
 
 def safe_amount(val):
@@ -128,7 +132,11 @@ def format_change(value):
     direction = "up" if value >= 0 else "down"
     return f"{direction} {abs(value):,.1f}%"
 
-# ── Data loaders ──────────────────────────────────────────────────────────────
+
+def format_money(value):
+    return f"NGN {value:,.0f}" if value else ""
+
+# Data loaders and analytics computations for the dashboard
 
 def load_all(db, sub_map, filters=None):
     data = {}
@@ -156,6 +164,13 @@ def load_all(db, sub_map, filters=None):
             if subsidiary_matches(r) and (not include_dates or date_matches(r))
         ]
 
+    def event_date_matches(dt):
+        if start_date and (not dt or dt < start_date):
+            return False
+        if end_date and (not dt or dt >= end_date):
+            return False
+        return True
+
     def count_between(records, start, end):
         return sum(
             1 for r in records
@@ -168,7 +183,7 @@ def load_all(db, sub_map, filters=None):
             if subsidiary_matches(r) and record_date(r) and start <= record_date(r) < end
         )
 
-    # ── Leave Requests ────────────────────────────────────────────────────────
+    # Leave Requests
     all_leaves = list(db["Leave_Request"].find({}))
     leaves = apply_filters(all_leaves)
     data["leave_total"]   = len(leaves)
@@ -187,7 +202,7 @@ def load_all(db, sub_map, filters=None):
     data["leave_by_type"]  = dict(sorted(leave_by_type.items()))
     data["leave_by_month"] = dict(sorted(leave_by_month.items()))
 
-    # ── Cash Advance ──────────────────────────────────────────────────────────
+    # Cash Advance
     all_advances = list(db["CashAdvance"].find({}))
     advances = apply_filters(all_advances)
     data["ca_total"]    = len(advances)
@@ -216,7 +231,7 @@ def load_all(db, sub_map, filters=None):
     data["ca_by_sub"]   = dict(sorted(ca_by_sub.items()))
     data["ca_by_month"] = dict(sorted(ca_by_month.items()))
 
-    # ── Expense Claims ────────────────────────────────────────────────────────
+    # Expense Claims
     all_expenses = list(db["ExpenseClaim"].find({}))
     expenses = apply_filters(all_expenses)
     data["ec_total"]    = len(expenses)
@@ -252,7 +267,7 @@ def load_all(db, sub_map, filters=None):
     data["ec_by_sub"]   = dict(sorted(ec_by_sub.items()))
     data["ec_by_month"] = dict(sorted(ec_by_month.items()))
 
-    # ── RTPS ──────────────────────────────────────────────────────────────────
+    # Request to Pay Supplier RTPS
     all_rtps = list(db["RequestToPaySupplier"].find({}))
     rtps = apply_filters(all_rtps)
     data["rtps_total"]    = len(rtps)
@@ -279,18 +294,403 @@ def load_all(db, sub_map, filters=None):
         amt = safe_amount(r.get("amount", 0))
         rtps_by_sub[sub]   += amt
         rtps_by_month[month_label(r.get("createdAt"))] += amt
-        rtps_by_supplier[r.get("name_of_supplier","Unknown")] += amt
+        rtps_by_supplier[normalize_cbc_text(r.get("name_of_supplier", "Unknown"))] += amt
         rtps_by_mode[r.get("mode_of_payment","Unknown")] += 1
 
+    sorted_suppliers = sorted(rtps_by_supplier.items(), key=lambda x: x[1], reverse=True)
     # Top 10 suppliers
-    top_suppliers = dict(sorted(rtps_by_supplier.items(),
-                                key=lambda x: x[1], reverse=True)[:10])
+    top_suppliers = dict(sorted_suppliers[:10])
     data["rtps_by_sub"]      = dict(sorted(rtps_by_sub.items()))
     data["rtps_by_month"]    = dict(sorted(rtps_by_month.items()))
     data["rtps_by_supplier"] = top_suppliers
     data["rtps_by_mode"]     = dict(rtps_by_mode)
 
-    # ── Approval rates ────────────────────────────────────────────────────────
+    def record_id(record):
+        return str(record.get("_id", ""))
+
+    def short_text(value, limit=92):
+        text = re.sub(r"\s+", " ", normalize_cbc_text(value)).strip()
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "..."
+
+    def event_stage(field):
+        return field.replace("_Approved", "").replace("_Rejected", "").replace("_", " ")
+
+    def add_activity(events, record, module, title, amount, field, action, accent):
+        event_time = record.get(field)
+        if not isinstance(event_time, datetime) or not event_date_matches(event_time):
+            return
+        events.append({
+            "time": event_time,
+            "time_label": event_time.strftime("%d %b %Y, %H:%M"),
+            "module": module,
+            "action": action,
+            "title": short_text(title, 72),
+            "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
+            "status": record.get("status", "Unknown"),
+            "amount": amount,
+            "description": short_text(record.get("justification", ""), 110),
+            "record_id": record_id(record),
+            "accent": accent,
+        })
+
+    def add_record_activities(events, records, module, title_fn, amount_fn, accent):
+        approval_fields = [
+            "Relief_Staff_Approved", "Supervisor_Approved", "HOD_Approved",
+            "HR_Approved", "GCFR_Approved", "Accountant_Approved",
+            "CFO_Approved", "CEO_Approved", "COO_Approved", "Chairman_Approved",
+        ]
+        rejection_fields = [
+            "Relief_Staff_Rejected", "Supervisor_Rejected", "HOD_Rejected",
+            "HR_Rejected", "GCFR_Rejected", "Accountant_Rejected",
+            "CFO_Rejected", "CEO_Rejected", "COO_Rejected", "Chairman_Rejected",
+        ]
+        for record in records:
+            if not subsidiary_matches(record):
+                continue
+            title = title_fn(record)
+            amount = amount_fn(record)
+            add_activity(events, record, module, title, amount, "createdAt", "Created request", accent)
+            created_at = record.get("createdAt")
+            updated_at = record.get("updatedAt")
+            if (
+                isinstance(updated_at, datetime)
+                and (not isinstance(created_at, datetime) or updated_at != created_at)
+            ):
+                add_activity(events, record, module, title, amount, "updatedAt", "Updated request", accent)
+            for field in approval_fields:
+                add_activity(
+                    events, record, module, title, amount, field,
+                    f"{event_stage(field)} approved", accent
+                )
+            for field in rejection_fields:
+                add_activity(
+                    events, record, module, title, amount, field,
+                    f"{event_stage(field)} rejected", "#0b3a75"
+                )
+
+    activity_events = []
+    add_record_activities(
+        activity_events,
+        all_leaves,
+        "Leave",
+        lambda r: f"{r.get('leave_Details', 'Leave')} leave",
+        lambda r: "",
+        "#1155cc",
+    )
+    add_record_activities(
+        activity_events,
+        all_advances,
+        "Cash Advance",
+        lambda r: r.get("name", "Cash advance"),
+        lambda r: format_money(safe_amount(r.get("amount", 0))),
+        "#1d6ff2",
+    )
+    add_record_activities(
+        activity_events,
+        all_expenses,
+        "Expense Claim",
+        lambda r: r.get("staff_name", "Expense claim"),
+        lambda r: format_money(ec_total_amount(r)),
+        "#4c93ff",
+    )
+    add_record_activities(
+        activity_events,
+        all_rtps,
+        "RTPS",
+        lambda r: r.get("name_of_supplier", "Supplier payment"),
+        lambda r: format_money(safe_amount(r.get("amount", 0))),
+        "#0b3a75",
+    )
+    activity_events = sorted(activity_events, key=lambda item: item["time"], reverse=True)
+    data["activity_total"] = len(activity_events)
+    data["activity_timeline"] = activity_events[:24]
+
+    current_time = app_now()
+
+    aging_bucket_defs = [
+        ("0-2 days", 0, 2),
+        ("3-7 days", 3, 7),
+        ("8-14 days", 8, 14),
+        ("15+ days", 15, None),
+    ]
+
+    def pending_age_days(record):
+        dt = record_date(record)
+        if not dt:
+            return None
+        return max((current_time.date() - dt.date()).days, 0)
+
+    def aging_bucket(days):
+        if days is None:
+            return "Unknown"
+        for label, start, end in aging_bucket_defs:
+            if days >= start and (end is None or days <= end):
+                return label
+        return "Unknown"
+
+    def next_stage(record, stages):
+        for label, field, previous_field in stages:
+            if previous_field and record.get(previous_field) is not True:
+                continue
+            if record.get(field) is not True:
+                return label
+        return "Review"
+
+    leave_stages = [
+        ("HOD", "is_HOD_Approved", None),
+        ("HR", "is_HR_Approved", "is_HOD_Approved"),
+    ]
+    finance_stages = [
+        ("HOD", "is_HOD_Approved", None),
+        ("GCFR", "is_GCFR_Approved", "is_HOD_Approved"),
+        ("Accountant", "is_Accountant_Approved", "is_GCFR_Approved"),
+        ("CFO", "is_CFO_Approved", "is_Accountant_Approved"),
+        ("CEO", "is_CEO_Approved", "is_CFO_Approved"),
+        ("COO", "is_COO_Approved", "is_CEO_Approved"),
+        ("Chairman", "is_Chairman_Approved", "is_COO_Approved"),
+    ]
+
+    aging_modules = [
+        ("Leave", leaves, lambda r: f"{r.get('leave_Details', 'Leave')} leave", lambda r: 0, leave_stages),
+        ("Cash Advance", advances, lambda r: r.get("name", "Cash advance"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
+        ("Expense Claim", expenses, lambda r: r.get("staff_name", "Expense claim"), ec_total_amount, finance_stages),
+        ("RTPS", rtps, lambda r: r.get("name_of_supplier", "Supplier payment"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
+    ]
+    aging_summary = {
+        label: {"label": label, "count": 0, "amount": 0.0, "modules": defaultdict(int)}
+        for label, _, _ in aging_bucket_defs
+    }
+    pending_items = []
+    for module, records, title_fn, amount_fn, stages in aging_modules:
+        for record in records:
+            if status_group(record) != "pending":
+                continue
+            days = pending_age_days(record)
+            bucket = aging_bucket(days)
+            if bucket not in aging_summary:
+                aging_summary[bucket] = {"label": bucket, "count": 0, "amount": 0.0, "modules": defaultdict(int)}
+            amount = amount_fn(record)
+            aging_summary[bucket]["count"] += 1
+            aging_summary[bucket]["amount"] += amount
+            aging_summary[bucket]["modules"][module] += 1
+            pending_items.append({
+                "module": module,
+                "title": short_text(title_fn(record), 72),
+                "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
+                "created": record.get("createdAt").strftime("%d %b %Y") if isinstance(record.get("createdAt"), datetime) else "Unknown",
+                "days": days if days is not None else 0,
+                "amount": format_money(amount),
+                "amount_value": amount,
+                "waiting_on": next_stage(record, stages),
+                "description": short_text(record.get("justification", ""), 110),
+            })
+
+    aging_rows = []
+    for label, _, _ in aging_bucket_defs:
+        row = aging_summary[label]
+        aging_rows.append({
+            "label": label,
+            "count": row["count"],
+            "amount": row["amount"],
+            "amount_label": format_money(row["amount"]) or "NGN 0",
+            "leave": row["modules"]["Leave"],
+            "cash_advance": row["modules"]["Cash Advance"],
+            "expense_claim": row["modules"]["Expense Claim"],
+            "rtps": row["modules"]["RTPS"],
+            "share": 0,
+        })
+    total_pending_aging = sum(row["count"] for row in aging_rows)
+    for row in aging_rows:
+        row["share"] = round(row["count"] / total_pending_aging * 100, 1) if total_pending_aging else 0
+    oldest_pending = sorted(pending_items, key=lambda item: item["days"], reverse=True)[:8]
+    data["pending_aging"] = aging_rows
+    data["pending_aging_total"] = total_pending_aging
+    data["oldest_pending"] = oldest_pending
+    data["oldest_pending_days"] = oldest_pending[0]["days"] if oldest_pending else 0
+    max_pending_amount = max((item["amount_value"] for item in pending_items), default=0)
+    for item in pending_items:
+        amount_score = (item["amount_value"] / max_pending_amount * 45) if max_pending_amount else 0
+        age_score = min(item["days"], 30) / 30 * 40
+        stage_score = 15 if item["waiting_on"] in {"CFO", "CEO", "COO", "Chairman"} else 8
+        item["priority_score"] = round(amount_score + age_score + stage_score, 1)
+        item["why"] = (
+            f"{item['days']} days old"
+            + (f", {item['amount']} waiting" if item["amount"] else "")
+            + f", waiting on {item['waiting_on']}"
+        )
+    data["action_required"] = sorted(
+        pending_items,
+        key=lambda item: (item["priority_score"], item["amount_value"], item["days"]),
+        reverse=True,
+    )[:5]
+
+    rejection_event_fields = [
+        ("HOD", "HOD_Rejected"),
+        ("HR", "HR_Rejected"),
+        ("GCFR", "GCFR_Rejected"),
+        ("Accountant", "Accountant_Rejected"),
+        ("CFO", "CFO_Rejected"),
+        ("CEO", "CEO_Rejected"),
+        ("COO", "COO_Rejected"),
+        ("Chairman", "Chairman_Rejected"),
+    ]
+
+    analytics_sources = [
+        ("Leave", leaves, lambda r: 0),
+        ("Cash Advance", advances, lambda r: safe_amount(r.get("amount", 0))),
+        ("Expense Claim", expenses, ec_total_amount),
+        ("RTPS", rtps, lambda r: safe_amount(r.get("amount", 0))),
+    ]
+
+    def is_rejected(record):
+        status = str(record.get("status", "")).strip().lower()
+        if status == "rejected":
+            return True
+        return any(isinstance(record.get(field), datetime) for _, field in rejection_event_fields)
+
+    rejection_rows = []
+    rejection_by_stage = defaultdict(int)
+    rejection_by_sub = defaultdict(int)
+    for module, records, amount_fn in analytics_sources:
+        rejected_records = [r for r in records if is_rejected(r)]
+        for r in rejected_records:
+            rejection_by_sub[resolve_sub(r.get("subsidiary_id", ""), sub_map)] += 1
+            for stage, field in rejection_event_fields:
+                if isinstance(r.get(field), datetime):
+                    rejection_by_stage[f"{stage} - {module}"] += 1
+        rejection_rows.append({
+            "module": module,
+            "count": len(rejected_records),
+            "rate": round(len(rejected_records) / len(records) * 100, 1) if records else 0,
+            "amount": sum(amount_fn(r) for r in rejected_records),
+            "amount_label": format_money(sum(amount_fn(r) for r in rejected_records)) or "NGN 0",
+        })
+    data["rejection_analytics"] = rejection_rows
+    data["rejection_hotspots"] = sorted(
+        [{"label": label, "count": count} for label, count in rejection_by_stage.items()],
+        key=lambda item: item["count"],
+        reverse=True,
+    )[:6]
+    data["rejection_by_subsidiary"] = sorted(
+        [{"subsidiary": sub, "count": count} for sub, count in rejection_by_sub.items()],
+        key=lambda item: item["count"],
+        reverse=True,
+    )[:5]
+
+    def requester(record, *fields):
+        for field in fields:
+            value = str(record.get(field, "") or "").strip()
+            if value:
+                return normalize_cbc_text(value)
+        return "Unknown"
+
+    staff_stats = defaultdict(lambda: {"count": 0, "amount": 0.0, "pending": 0, "rejected": 0, "modules": defaultdict(int)})
+    staff_sources = [
+        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: 0),
+        ("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: safe_amount(r.get("amount", 0))),
+        ("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), ec_total_amount),
+    ]
+    for module, records, name_fn, amount_fn in staff_sources:
+        for r in records:
+            name = name_fn(r)
+            staff_stats[name]["count"] += 1
+            staff_stats[name]["amount"] += amount_fn(r)
+            staff_stats[name]["pending"] += 1 if status_group(r) == "pending" else 0
+            staff_stats[name]["rejected"] += 1 if is_rejected(r) else 0
+            staff_stats[name]["modules"][module] += 1
+    data["staff_behavior"] = sorted(
+        [
+            {
+                "name": name,
+                "count": row["count"],
+                "amount": row["amount"],
+                "amount_label": format_money(row["amount"]) or "NGN 0",
+                "pending": row["pending"],
+                "rejected": row["rejected"],
+                "main_module": max(row["modules"].items(), key=lambda item: item[1])[0] if row["modules"] else "Unknown",
+            }
+            for name, row in staff_stats.items()
+        ],
+        key=lambda item: (item["amount"], item["count"]),
+        reverse=True,
+    )[:8]
+
+    duplicate_groups = defaultdict(list)
+    duplicate_sources = [
+        ("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: safe_amount(r.get("amount", 0))),
+        ("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), ec_total_amount),
+        ("RTPS", rtps, lambda r: requester(r, "name_of_supplier"), lambda r: safe_amount(r.get("amount", 0))),
+    ]
+    for module, records, owner_fn, amount_fn in duplicate_sources:
+        for r in records:
+            dt = record_date(r)
+            amount = round(amount_fn(r), 2)
+            if not dt or not amount:
+                continue
+            key = (module, owner_fn(r).lower(), amount, dt.strftime("%Y-%m"))
+            duplicate_groups[key].append(r)
+    suspicious = []
+    for (module, owner, amount, month), records in duplicate_groups.items():
+        if len(records) < 2:
+            continue
+        dates = sorted([record_date(r) for r in records if record_date(r)])
+        days_span = (dates[-1] - dates[0]).days if len(dates) > 1 else 0
+        suspicious.append({
+            "module": module,
+            "owner": normalize_cbc_text(owner.title()),
+            "count": len(records),
+            "amount": amount,
+            "amount_label": format_money(amount) or "NGN 0",
+            "month": month,
+            "reason": f"{len(records)} requests with same owner and amount in {month}; {days_span} days apart.",
+        })
+    data["suspicious_requests"] = sorted(
+        suspicious,
+        key=lambda item: (item["count"], item["amount"]),
+        reverse=True,
+    )[:8]
+
+    next_month = datetime(current_time.year + (1 if current_time.month == 12 else 0), 1 if current_time.month == 12 else current_time.month + 1, 1)
+    days_to_month_end = max((next_month.date() - current_time.date()).days, 0)
+    close_month_start = datetime(current_time.year, current_time.month, 1)
+    close_month_spend = (
+        spend_between(all_advances, lambda r: safe_amount(r.get("amount", 0)), close_month_start, current_time + timedelta(days=1))
+        + spend_between(all_expenses, ec_total_amount, close_month_start, current_time + timedelta(days=1))
+        + spend_between(all_rtps, lambda r: safe_amount(r.get("amount", 0)), close_month_start, current_time + timedelta(days=1))
+    )
+    close_pending_spend = data["ca_pending_amount"] + data["ec_pending_amount"] + data["rtps_pending_amount"]
+    close_unclassified_spend = data["ca_unclassified_amount"] + data["ec_unclassified_amount"] + data["rtps_unclassified_amount"]
+    data["month_end_close"] = {
+        "days_left": days_to_month_end,
+        "pending_value": close_pending_spend,
+        "pending_label": format_money(close_pending_spend) or "NGN 0",
+        "approved_label": format_money(close_month_spend) or "NGN 0",
+        "unclassified_label": format_money(close_unclassified_spend) or "NGN 0",
+        "blockers": len([item for item in pending_items if item["days"] >= 8]),
+    }
+
+    recent_start = current_time - timedelta(days=7)
+    recent_created = [
+        item for item in activity_events
+        if item["action"] == "Created request" and item["time"] >= recent_start
+    ]
+    recent_approved = [
+        item for item in activity_events
+        if "approved" in item["action"].lower() and item["time"] >= recent_start
+    ]
+    recent_rejected = [
+        item for item in activity_events
+        if "rejected" in item["action"].lower() and item["time"] >= recent_start
+    ]
+    data["what_changed"] = {
+        "window": "Last 7 days",
+        "new_requests": len(recent_created),
+        "approvals": len(recent_approved),
+        "rejections": len(recent_rejected),
+        "latest": activity_events[:6],
+    }
+
+    # Approval rates
     def approval_rate(records, field):
         total    = len(records)
         approved = sum(1 for r in records if r.get(field) is True)
@@ -310,7 +710,7 @@ def load_all(db, sub_map, filters=None):
         "CEO (RTPS)":         approval_rate(rtps,     "is_CEO_Approved"),
     }
 
-    # ── Executive signals ────────────────────────────────────────────────────
+    # Executive signals
     total_spend = data["ca_amount"] + data["ec_amount"] + data["rtps_amount"]
     approved_spend = (
         data["ca_approved_amount"] + data["ec_approved_amount"] + data["rtps_approved_amount"]
@@ -354,28 +754,47 @@ def load_all(db, sub_map, filters=None):
     data["lowest_approval_label"] = lowest_approval_label
     data["lowest_approval_rate"] = lowest_approval_rate
 
-    def waiting_stage(records, field, previous_field=None):
-        return sum(
-            1 for r in records
-            if r.get("status") == "Pending"
+    def waiting_stage_details(records, field, amount_fn, previous_field=None):
+        waiting = [
+            r for r in records
+            if status_group(r) == "pending"
             and r.get(field) is not True
             and (previous_field is None or r.get(previous_field) is True)
-        )
+        ]
+        amount = sum(amount_fn(r) for r in waiting)
+        ages = [pending_age_days(r) for r in waiting if pending_age_days(r) is not None]
+        avg_days = round(sum(ages) / len(ages), 1) if ages else 0
+        return len(waiting), amount, avg_days
+
+    def bottleneck(label, records, field, amount_fn, previous_field=None):
+        count, amount, avg_days = waiting_stage_details(records, field, amount_fn, previous_field)
+        return {
+            "label": label,
+            "count": count,
+            "amount": amount,
+            "amount_label": format_money(amount) or "NGN 0",
+            "avg_days": avg_days,
+            "impact": f"{count} requests, {format_money(amount) or 'NGN 0'} waiting, {avg_days} avg days",
+        }
 
     bottlenecks = [
-        {"label": "HOD - Leave", "count": waiting_stage(leaves, "is_HOD_Approved")},
-        {"label": "HR - Leave", "count": waiting_stage(leaves, "is_HR_Approved", "is_HOD_Approved")},
-        {"label": "HOD - Cash Adv", "count": waiting_stage(advances, "is_HOD_Approved")},
-        {"label": "CFO - Cash Adv", "count": waiting_stage(advances, "is_CFO_Approved", "is_HOD_Approved")},
-        {"label": "CEO - Cash Adv", "count": waiting_stage(advances, "is_CEO_Approved", "is_CFO_Approved")},
-        {"label": "HOD - Expense", "count": waiting_stage(expenses, "is_HOD_Approved")},
-        {"label": "CFO - Expense", "count": waiting_stage(expenses, "is_CFO_Approved", "is_HOD_Approved")},
-        {"label": "CEO - Expense", "count": waiting_stage(expenses, "is_CEO_Approved", "is_CFO_Approved")},
-        {"label": "HOD - RTPS", "count": waiting_stage(rtps, "is_HOD_Approved")},
-        {"label": "CFO - RTPS", "count": waiting_stage(rtps, "is_CFO_Approved", "is_HOD_Approved")},
-        {"label": "CEO - RTPS", "count": waiting_stage(rtps, "is_CEO_Approved", "is_CFO_Approved")},
+        bottleneck("HOD - Leave", leaves, "is_HOD_Approved", lambda r: 0),
+        bottleneck("HR - Leave", leaves, "is_HR_Approved", lambda r: 0, "is_HOD_Approved"),
+        bottleneck("HOD - Cash Adv", advances, "is_HOD_Approved", lambda r: safe_amount(r.get("amount", 0))),
+        bottleneck("CFO - Cash Adv", advances, "is_CFO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_HOD_Approved"),
+        bottleneck("CEO - Cash Adv", advances, "is_CEO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_CFO_Approved"),
+        bottleneck("HOD - Expense", expenses, "is_HOD_Approved", ec_total_amount),
+        bottleneck("CFO - Expense", expenses, "is_CFO_Approved", ec_total_amount, "is_HOD_Approved"),
+        bottleneck("CEO - Expense", expenses, "is_CEO_Approved", ec_total_amount, "is_CFO_Approved"),
+        bottleneck("HOD - RTPS", rtps, "is_HOD_Approved", lambda r: safe_amount(r.get("amount", 0))),
+        bottleneck("CFO - RTPS", rtps, "is_CFO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_HOD_Approved"),
+        bottleneck("CEO - RTPS", rtps, "is_CEO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_CFO_Approved"),
     ]
-    data["bottlenecks"] = sorted(bottlenecks, key=lambda x: x["count"], reverse=True)[:6]
+    data["bottlenecks"] = sorted(
+        bottlenecks,
+        key=lambda x: (x["amount"], x["count"], x["avg_days"]),
+        reverse=True,
+    )[:6]
 
     current_time = app_now()
     month_start = datetime(current_time.year, current_time.month, 1)
@@ -402,22 +821,103 @@ def load_all(db, sub_map, filters=None):
         + spend_between(all_expenses, ec_total_amount, previous_start, previous_end)
         + spend_between(all_rtps, lambda r: safe_amount(r.get("amount", 0)), previous_start, previous_end)
     )
+    requests_change_value = amount_change(current_requests, previous_requests)
+    spend_change_value = amount_change(current_spend, previous_spend)
     data["month_compare"] = {
         "requests": current_requests,
-        "requests_change": format_change(amount_change(current_requests, previous_requests)),
+        "requests_change": format_change(requests_change_value),
+        "requests_change_value": requests_change_value,
         "spend": current_spend,
-        "spend_change": format_change(amount_change(current_spend, previous_spend)),
+        "spend_change": format_change(spend_change_value),
+        "spend_change_value": spend_change_value,
     }
 
+    pending_ratio = round(pending_spend / total_spend * 100, 1) if total_spend else 0
+    risk_points = 0
+    risk_points += 25 if pending_ratio >= 40 else 15 if pending_ratio >= 20 else 0
+    risk_points += 25 if data["oldest_pending_days"] >= 15 else 12 if data["oldest_pending_days"] >= 8 else 0
+    risk_points += 20 if lowest_approval_rate < 50 else 10 if lowest_approval_rate < 70 else 0
+    risk_points += 15 if unclassified_spend else 0
+    risk_points += 15 if spend_change_value >= 35 else 8 if spend_change_value >= 15 else 0
+    health_score = max(0, 100 - risk_points)
+    if health_score >= 80:
+        health_status, health_tone = "Good", "Operations are moving normally."
+    elif health_score >= 60:
+        health_status, health_tone = "Watch", "A few queues or spending movements need attention."
+    else:
+        health_status, health_tone = "Needs Attention", "Approval delays or spend exposure should be reviewed today."
+    data["health"] = {
+        "score": health_score,
+        "status": health_status,
+        "tone": health_tone,
+        "pending_ratio": pending_ratio,
+    }
+
+    data_quality_warnings = []
+    if unclassified_spend:
+        data_quality_warnings.append(
+            f"Unclassified finance requests total NGN {unclassified_spend:,.0f}; totals may shift after statuses are cleaned."
+        )
+    if data["ca_unclassified"] or data["ec_unclassified"] or data["rtps_unclassified"]:
+        data_quality_warnings.append(
+            f"{data['ca_unclassified'] + data['ec_unclassified'] + data['rtps_unclassified']} finance records have unclear status."
+        )
+    if any(row["count"] for row in aging_rows) and data["oldest_pending_days"] >= 15:
+        data_quality_warnings.append(
+            f"Oldest pending request is {data['oldest_pending_days']} days old; aging should be checked with approvers."
+        )
+    data["data_quality_warnings"] = data_quality_warnings
+
+    risk_alerts = []
+    largest_pending = max(pending_items, key=lambda item: item["amount_value"], default=None)
+    if largest_pending and largest_pending["amount_value"] > 0:
+        risk_alerts.append(
+            f"Largest pending request is {largest_pending['amount']} in {largest_pending['module']} for {largest_pending['subsidiary']}."
+        )
+    if spend_change_value >= 25:
+        risk_alerts.append(f"Month-to-date spend is up {spend_change_value:,.1f}% versus last month.")
+    if data["oldest_pending_days"] >= 8:
+        risk_alerts.append(f"Oldest pending request has waited {data['oldest_pending_days']} days.")
+    data["risk_alerts"] = risk_alerts
+
+    scorecards = []
+    for sub in sorted(set(list(spend_by_sub.keys()) + list(sub_map.values()))):
+        sub_pending_items = [item for item in pending_items if item["subsidiary"] == sub]
+        scorecards.append({
+            "subsidiary": sub,
+            "spend": spend_by_sub.get(sub, 0),
+            "spend_label": format_money(spend_by_sub.get(sub, 0)) or "NGN 0",
+            "pending_count": len(sub_pending_items),
+            "pending_amount": sum(item["amount_value"] for item in sub_pending_items),
+            "pending_label": format_money(sum(item["amount_value"] for item in sub_pending_items)) or "NGN 0",
+            "oldest_days": max((item["days"] for item in sub_pending_items), default=0),
+        })
+    data["subsidiary_scorecards"] = sorted(
+        scorecards,
+        key=lambda item: (item["pending_amount"], item["spend"], item["oldest_days"]),
+        reverse=True,
+    )[:8]
+
+    data["beginner_explainers"] = [
+        {"term": "Waiting Approval", "meaning": "Money or requests submitted but not fully cleared by the approval chain."},
+        {"term": "Approval Rate", "meaning": "The share of requests that have been approved at each stage."},
+        {"term": "Pending Aging", "meaning": "How long requests have been waiting. Older items are usually the first to chase."},
+        {"term": "RTPS", "meaning": "Request to Pay Supplier. This is supplier payment exposure."},
+        {"term": "Month-End Close", "meaning": "Items that can affect finance reporting before the month closes."},
+        {"term": "Suspicious Requests", "meaning": "Repeat requests with the same owner and amount that may need a second look."},
+    ]
+
     data["insights"] = [
+        f"Platform health is {health_status}: {health_tone}",
         f"{highest_pending_module} has the highest waiting approval spend at NGN {highest_pending_amount:,.0f}.",
         f"{top_sub} is the highest spending subsidiary in this view at NGN {top_sub_amount:,.0f}.",
         f"{lowest_approval_label} currently has the lowest approval rate at {lowest_approval_rate}%.",
+        f"Waiting approval spend is NGN {data['pending_spend']:,.0f} across active requests.",
     ]
 
     return data
 
-# ── Chart builders ────────────────────────────────────────────────────────────
+# Chart builders
 
 def blue_scale(count):
     palette = ["#0b3a75", "#1155cc", "#1d6ff2", "#4c93ff", "#8fc3ff", "#c7e2ff"]
@@ -477,13 +977,13 @@ def hbar(x, y, title, color="#1155cc"):
     fig = go.Figure(go.Bar(
         x=x, y=y, orientation="h",
         marker=dict(color=blue_scale(len(x)), line=dict(color="rgba(255,255,255,0.75)", width=1)),
-        text=[f"₦{v:,.0f}" for v in x],
+        text=[f"â‚¦{v:,.0f}" for v in x],
         textposition="outside"
     ))
     chart_layout(fig, title, 340, dict(t=50, b=20, l=120, r=60), font_size=10)
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
-# ── HTML template ─────────────────────────────────────────────────────────────
+# HTML template
 
 TEMPLATE = """
 <!DOCTYPE html>
@@ -491,7 +991,7 @@ TEMPLATE = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IGEZ — Analytics Dashboard</title>
+<title>IGEZ - Analytics Dashboard</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -601,6 +1101,135 @@ TEMPLATE = """
   .bottleneck-list { display: grid; gap: 9px; margin-top: 12px; }
   .bottleneck-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
   .bottleneck-row strong { color: #4c93ff; }
+  .executive-tools {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px;
+  }
+  .mini-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: 34px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.34);
+    color: white; text-decoration: none; font-size: 12px; font-weight: 800;
+  }
+  .health-card {
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 8px; padding: 12px; margin-top: 14px;
+  }
+  .health-card .score { font-size: 30px; font-weight: 900; color: #ffffff; }
+  .health-card .status { font-size: 13px; color: #bfdbfe; font-weight: 900; }
+  .health-meter { height: 8px; background: rgba(255,255,255,0.18); border-radius: 999px; overflow: hidden; margin-top: 10px; }
+  .health-fill { height: 100%; background: linear-gradient(90deg, #8fc3ff, #ffffff); border-radius: inherit; }
+
+  .exec-panel-grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 16px; margin-top: 16px; }
+  .exec-card {
+    background: linear-gradient(145deg, rgba(255,255,255,0.92), rgba(239,247,255,0.72));
+    border: 1px solid rgba(143,195,255,0.48); border-radius: 12px; padding: 16px;
+    box-shadow: 0 22px 50px rgba(8,47,99,0.12);
+  }
+  .exec-card h3 { font-size: 15px; color: #082f63; margin-bottom: 12px; }
+  .action-list, .simple-list, .scorecard-list { display: grid; gap: 10px; }
+  .action-item {
+    display: grid; grid-template-columns: 78px 1fr auto; gap: 12px; align-items: start;
+    padding: 12px 0; border-bottom: 1px solid rgba(199,221,246,0.64);
+  }
+  .action-item:last-child { border-bottom: 0; }
+  .priority { color: #1155cc; font-size: 12px; font-weight: 900; text-transform: uppercase; }
+  .priority strong { display: block; color: #061b3a; font-size: 20px; margin-top: 2px; }
+  .action-title { color: #061b3a; font-size: 14px; font-weight: 900; overflow-wrap: anywhere; }
+  .action-meta { color: #5d7899; font-size: 12px; line-height: 1.45; margin-top: 4px; }
+  .action-side { text-align: right; color: #244a78; font-size: 12px; font-weight: 800; white-space: nowrap; }
+  .explain-item, .warning-item, .scorecard-item {
+    border: 1px solid rgba(17,85,204,0.12); background: rgba(255,255,255,0.58);
+    border-radius: 8px; padding: 10px;
+  }
+  .explain-item strong, .warning-item strong, .scorecard-item strong { color: #082f63; }
+  .explain-item span, .warning-item span, .scorecard-item span { color: #5d7899; font-size: 12px; line-height: 1.45; display: block; margin-top: 3px; }
+  .decision-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+  .decision-tile {
+    background: linear-gradient(145deg, rgba(255,255,255,0.94), rgba(231,243,255,0.58));
+    border: 1px solid rgba(143,195,255,0.46);
+    border-radius: 8px; padding: 12px; min-height: 92px;
+    box-shadow: 0 14px 30px rgba(8,47,99,0.08);
+  }
+  .decision-tile span { display: block; color: #5d7899; font-size: 11px; font-weight: 900; text-transform: uppercase; }
+  .decision-tile strong { display: block; margin-top: 7px; color: #061b3a; font-size: 22px; font-weight: 900; }
+  .decision-tile small { display: block; margin-top: 4px; color: #5d7899; line-height: 1.35; }
+  .compact-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .compact-table th { text-align: left; color: #082f63; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #c7ddf6; padding: 8px 6px; }
+  .compact-table td { border-bottom: 1px solid rgba(199,221,246,0.64); padding: 8px 6px; color: #244a78; vertical-align: top; }
+  /* Activity timeline */
+  .timeline-card {
+    background: linear-gradient(145deg, rgba(255,255,255,0.92), rgba(239,247,255,0.72));
+    border: 1px solid rgba(143,195,255,0.48); border-radius: 12px; padding: 16px;
+    box-shadow: 0 22px 50px rgba(8,47,99,0.12);
+    backdrop-filter: blur(14px);
+  }
+  .timeline-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    border-bottom: 1px solid rgba(143,195,255,0.38); padding-bottom: 12px; margin-bottom: 4px;
+  }
+  .timeline-head h3 { font-size: 15px; color: #082f63; }
+  .timeline-head span { color: #5d7899; font-size: 12px; font-weight: 700; }
+  .timeline-list { display: grid; }
+  .timeline-item {
+    display: grid; grid-template-columns: 132px 1fr auto; gap: 14px;
+    padding: 14px 0; border-bottom: 1px solid rgba(199,221,246,0.64);
+  }
+  .timeline-item:last-child { border-bottom: 0; }
+  .timeline-time { color: #456489; font-size: 12px; font-weight: 800; line-height: 1.35; }
+  .timeline-main { min-width: 0; border-left: 4px solid var(--accent, #1155cc); padding-left: 12px; }
+  .timeline-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 6px; }
+  .timeline-chip {
+    background: rgba(17,85,204,0.09); color: #082f63; border: 1px solid rgba(17,85,204,0.16);
+    border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 800;
+  }
+  .timeline-action { color: #1155cc; font-size: 12px; font-weight: 900; }
+  .timeline-title { color: #061b3a; font-weight: 900; font-size: 14px; overflow-wrap: anywhere; }
+  .timeline-desc { color: #5d7899; font-size: 12px; line-height: 1.45; margin-top: 4px; }
+  .timeline-side { text-align: right; color: #244a78; font-size: 12px; font-weight: 800; white-space: nowrap; }
+  .timeline-side .status { color: #5d7899; margin-top: 5px; }
+  .timeline-empty { padding: 20px 0 8px; color: #5d7899; font-size: 13px; }
+
+  /* Pending aging */
+  .aging-grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 16px; }
+  .aging-card {
+    background: linear-gradient(145deg, rgba(255,255,255,0.92), rgba(239,247,255,0.72));
+    border: 1px solid rgba(143,195,255,0.48); border-radius: 12px; padding: 16px;
+    box-shadow: 0 22px 50px rgba(8,47,99,0.12);
+    backdrop-filter: blur(14px);
+  }
+  .aging-card h3 { font-size: 15px; color: #082f63; margin-bottom: 12px; }
+  .aging-buckets { display: grid; gap: 10px; }
+  .aging-row {
+    display: grid; grid-template-columns: 82px 1fr auto; gap: 12px; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid rgba(199,221,246,0.64);
+  }
+  .aging-row:last-child { border-bottom: 0; }
+  .aging-label { color: #082f63; font-size: 13px; font-weight: 900; }
+  .aging-bar { height: 10px; background: #dbeafe; border-radius: 999px; overflow: hidden; }
+  .aging-fill { height: 100%; min-width: 3px; background: linear-gradient(90deg, #1155cc, #4c93ff); border-radius: inherit; }
+  .aging-count { text-align: right; color: #244a78; font-size: 12px; font-weight: 800; }
+  .aging-amount { color: #5d7899; font-size: 11px; margin-top: 3px; }
+  .aging-module-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+  .aging-module {
+    border: 1px solid rgba(17,85,204,0.14); background: rgba(17,85,204,0.06);
+    border-radius: 8px; padding: 8px; min-height: 54px;
+  }
+  .aging-module span { display: block; color: #5d7899; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+  .aging-module strong { display: block; color: #061b3a; font-size: 17px; margin-top: 4px; }
+  .oldest-list { display: grid; }
+  .oldest-item {
+    display: grid; grid-template-columns: 76px 1fr auto; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid rgba(199,221,246,0.64);
+  }
+  .oldest-item:last-child { border-bottom: 0; }
+  .oldest-age { color: #1155cc; font-size: 16px; font-weight: 900; }
+  .oldest-age span { display: block; color: #5d7899; font-size: 10px; text-transform: uppercase; }
+  .oldest-main { min-width: 0; }
+  .oldest-meta { color: #1155cc; font-size: 11px; font-weight: 900; margin-bottom: 4px; }
+  .oldest-title { color: #061b3a; font-size: 13px; font-weight: 900; overflow-wrap: anywhere; }
+  .oldest-desc { color: #5d7899; font-size: 12px; line-height: 1.4; margin-top: 3px; }
+  .oldest-side { text-align: right; color: #244a78; font-size: 12px; font-weight: 800; white-space: nowrap; }
+  .oldest-side .stage { color: #1155cc; margin-top: 4px; }
 
   /* KPI cards */
   .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
@@ -646,7 +1275,14 @@ TEMPLATE = """
   .footer { text-align: center; padding: 24px; color: #aaa; font-size: 12px; }
 
   @media (max-width: 900px) {
-    .filter-bar, .executive-grid, .signal-grid, .chart-grid-2, .chart-grid-3 { grid-template-columns: 1fr; }
+    .filter-bar, .executive-grid, .signal-grid, .exec-panel-grid, .decision-grid, .aging-grid, .chart-grid-2, .chart-grid-3 { grid-template-columns: 1fr; }
+    .aging-module-grid { grid-template-columns: repeat(2, 1fr); }
+    .action-item { grid-template-columns: 1fr; gap: 8px; }
+    .action-side { text-align: left; white-space: normal; }
+    .oldest-item { grid-template-columns: 1fr; gap: 8px; }
+    .oldest-side { text-align: left; white-space: normal; }
+    .timeline-item { grid-template-columns: 1fr; gap: 8px; }
+    .timeline-side { text-align: left; white-space: normal; }
     .filter-hint { grid-column: 1; text-align: left; }
   }
 </style>
@@ -655,10 +1291,10 @@ TEMPLATE = """
 
 <div class="header">
   <div>
-    <div class="h1">IGEZ — Analytics Dashboard</div>
+    <div class="h1">IGEZ - Analytics Dashboard</div>
     <div class="sub">Live data from MongoDB · Last refreshed: {{ now }}</div>
   </div>
-  <a href="/" class="refresh-btn">↻ Refresh</a>
+  <a href="/" class="refresh-btn">Refresh</a>
 </div>
 
 <div class="container">
@@ -668,7 +1304,7 @@ TEMPLATE = """
       Period
       <select name="period" id="periodFilter" {% if filters.date_selection_active %}class="period-disabled" disabled{% endif %}>
         {% if filters.date_selection_active %}
-        <option value="date_active" selected>🚫 Date range active</option>
+        <option value="date_active" selected>Date range active</option>
         {% endif %}
         <option value="today" {% if filters.period == "today" and not filters.date_selection_active %}selected{% endif %}>Today</option>
         <option value="week" {% if filters.period == "week" and not filters.date_selection_active %}selected{% endif %}>This week</option>
@@ -691,12 +1327,12 @@ TEMPLATE = """
     <label>
       From
       <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="start" id="startDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.start }}{% endif %}" data-date-value="{{ filters.start }}" {% if filters.period_filter_active %}disabled{% endif %}>
-      <span class="filter-alert" id="startDateHint">{% if filters.period_filter_active %}🚫 Period active{% elif filters.date_range_incomplete and not filters.start %}Select From{% endif %}</span>
+      <span class="filter-alert" id="startDateHint">{% if filters.period_filter_active %}Period active{% elif filters.date_range_incomplete and not filters.start %}Select From{% endif %}</span>
     </label>
     <label>
       To
       <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="end" id="endDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.end }}{% endif %}" data-date-value="{{ filters.end }}" {% if filters.period_filter_active %}disabled{% endif %}>
-      <span class="filter-alert" id="endDateHint">{% if filters.period_filter_active %}🚫 Period active{% elif filters.date_range_incomplete and not filters.end %}Select To{% endif %}</span>
+      <span class="filter-alert" id="endDateHint">{% if filters.period_filter_active %}Period active{% elif filters.date_range_incomplete and not filters.end %}Select To{% endif %}</span>
     </label>
     <button type="submit" id="applyFilters" {% if filters.date_range_incomplete or filters.date_range_invalid %}disabled{% endif %}>Apply</button>
     <div class="filter-hint" id="filterHint">{% if filters.date_range_invalid %}From date cannot be later than To date.{% elif filters.date_range_incomplete %}Select both From and To dates before applying.{% endif %}</div>
@@ -753,14 +1389,250 @@ TEMPLATE = """
       </ul>
       <div class="bottleneck-list">
         {% for item in d.bottlenecks %}
-        <div class="bottleneck-row"><span>{{ item.label }}</span><strong>{{ item.count }}</strong></div>
+        <div class="bottleneck-row"><span>{{ item.label }}<br><small>{{ item.impact }}</small></span><strong>{{ item.count }}</strong></div>
         {% endfor %}
+      </div>
+      <div class="health-card">
+        <div class="status">Platform Health: {{ d.health.status }}</div>
+        <div class="score">{{ d.health.score }}/100</div>
+        <div class="ready-copy">{{ d.health.tone }} Pending exposure is {{ d.health.pending_ratio }}% of total spend.</div>
+        <div class="health-meter"><div class="health-fill" style="width:{{ d.health.score }}%"></div></div>
+      </div>
+      <div class="executive-tools">
+        <a class="mini-btn" href="/executive-report{% if report_query %}?{{ report_query }}{% endif %}">Download Executive PDF</a>
       </div>
       {% endif %}
     </div>
   </div>
 
-  <!-- ── KPI OVERVIEW ── -->
+  <!-- Executive decision layer -->
+  <div class="exec-panel-grid">
+    <div class="exec-card">
+      <h3>Action Required Today</h3>
+      {% if d.action_required %}
+      <div class="action-list">
+        {% for item in d.action_required %}
+        <div class="action-item">
+          <div class="priority">Priority<strong>{{ loop.index }}</strong></div>
+          <div>
+            <div class="action-title">{{ item.title }}</div>
+            <div class="action-meta">{{ item.module }} · {{ item.subsidiary }} · {{ item.why }}</div>
+            {% if item.description %}<div class="action-meta">{{ item.description }}</div>{% endif %}
+          </div>
+          <div class="action-side">
+            {% if item.amount %}<div>{{ item.amount }}</div>{% endif %}
+            <div>Score {{ item.priority_score }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="timeline-empty">No urgent pending actions matched the current filters.</div>
+      {% endif %}
+    </div>
+    <div class="exec-card">
+      <h3>Beginner Guide</h3>
+      <div class="simple-list">
+        {% for item in d.beginner_explainers %}
+        <div class="explain-item"><strong>{{ item.term }}</strong><span>{{ item.meaning }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="exec-panel-grid">
+    <div class="exec-card">
+      <h3>Subsidiary Scorecards</h3>
+      <div class="scorecard-list">
+        {% for item in d.subsidiary_scorecards %}
+        <div class="scorecard-item">
+          <strong>{{ item.subsidiary }}</strong>
+          <span>{{ item.spend_label }} total spend · {{ item.pending_label }} waiting · {{ item.pending_count }} pending · oldest {{ item.oldest_days }} days</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="exec-card">
+      <h3>Spend Risk Alerts</h3>
+      <div class="simple-list">
+        {% if d.risk_alerts %}
+          {% for alert in d.risk_alerts %}
+          <div class="warning-item"><strong>Alert</strong><span>{{ alert }}</span></div>
+          {% endfor %}
+        {% else %}
+          <div class="warning-item"><strong>Stable</strong><span>No major spend risk alerts in this view.</span></div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="exec-card" style="margin-top:16px">
+      <h3>Data Quality Warnings</h3>
+      <div class="simple-list">
+        {% if d.data_quality_warnings %}
+          {% for warning in d.data_quality_warnings %}
+          <div class="warning-item"><strong>Review</strong><span>{{ warning }}</span></div>
+          {% endfor %}
+        {% else %}
+          <div class="warning-item"><strong>Clean</strong><span>No major data-quality warnings in this view.</span></div>
+        {% endif %}
+      </div>
+  </div>
+
+  <div class="section-title">Decision Cockpit</div>
+  <div class="exec-card">
+    <h3>What changed recently</h3>
+    <div class="decision-grid">
+      <div class="decision-tile"><span>Window</span><strong>{{ d.what_changed.window }}</strong><small>Recent platform movement</small></div>
+      <div class="decision-tile"><span>New Requests</span><strong>{{ d.what_changed.new_requests }}</strong><small>Created recently</small></div>
+      <div class="decision-tile"><span>Approvals</span><strong>{{ d.what_changed.approvals }}</strong><small>Approval actions completed</small></div>
+      <div class="decision-tile"><span>Rejections</span><strong>{{ d.what_changed.rejections }}</strong><small>Items sent back or declined</small></div>
+    </div>
+  </div>
+
+  <div class="exec-panel-grid">
+    <div class="exec-card">
+      <h3>Rejection Analytics</h3>
+      <table class="compact-table">
+        <thead><tr><th>Module</th><th>Rate</th><th>Value</th></tr></thead>
+        <tbody>
+          {% for row in d.rejection_analytics %}
+          <tr><td>{{ row.module }}</td><td>{{ row.rate }}%</td><td>{{ row.amount_label }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="simple-list" style="margin-top:10px">
+        {% if d.rejection_hotspots %}
+          {% for row in d.rejection_hotspots %}
+          <div class="warning-item"><strong>{{ row.label }}</strong><span>{{ row.count }} rejected items</span></div>
+          {% endfor %}
+        {% else %}
+          <div class="warning-item"><strong>Stable</strong><span>No rejection hotspots in this view.</span></div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="exec-card">
+      <h3>Month-End Close View</h3>
+      <div class="decision-grid" style="grid-template-columns:1fr 1fr">
+        <div class="decision-tile"><span>Days Left</span><strong>{{ d.month_end_close.days_left }}</strong><small>To month end</small></div>
+        <div class="decision-tile"><span>Pending</span><strong>{{ d.month_end_close.pending_label }}</strong><small>May affect close</small></div>
+        <div class="decision-tile"><span>Current Spend</span><strong>{{ d.month_end_close.approved_label }}</strong><small>Month-to-date exposure</small></div>
+        <div class="decision-tile"><span>Blockers</span><strong>{{ d.month_end_close.blockers }}</strong><small>Pending 8+ days</small></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="exec-panel-grid">
+    <div class="exec-card">
+      <h3>Duplicate or Suspicious Requests</h3>
+      <div class="simple-list">
+        {% if d.suspicious_requests %}
+          {% for item in d.suspicious_requests %}
+          <div class="warning-item"><strong>{{ item.owner }} · {{ item.amount_label }}</strong><span>{{ item.module }} · {{ item.reason }}</span></div>
+          {% endfor %}
+        {% else %}
+          <div class="warning-item"><strong>Clean</strong><span>No same-owner, same-amount repeat requests detected for the selected period.</span></div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="exec-card">
+      <h3>Staff Request Behavior</h3>
+      <table class="compact-table">
+        <thead><tr><th>Requester</th><th>Requests</th><th>Pending</th><th>Value</th></tr></thead>
+        <tbody>
+          {% for item in d.staff_behavior %}
+          <tr><td>{{ item.name }}<br><small>{{ item.main_module }}</small></td><td>{{ item.count }}</td><td>{{ item.pending }}</td><td>{{ item.amount_label }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section-title">Activity Timeline</div>
+  <div class="timeline-card">
+    <div class="timeline-head">
+      <h3>Latest platform activity</h3>
+      <span>{{ d.activity_total }} matching events</span>
+    </div>
+    {% if d.activity_timeline %}
+    <div class="timeline-list">
+      {% for item in d.activity_timeline %}
+      <div class="timeline-item" style="--accent:{{ item.accent }}">
+        <div class="timeline-time">{{ item.time_label }}</div>
+        <div class="timeline-main">
+          <div class="timeline-meta">
+            <span class="timeline-chip">{{ item.module }}</span>
+            <span class="timeline-action">{{ item.action }}</span>
+          </div>
+          <div class="timeline-title">{{ item.title }}</div>
+          {% if item.description %}
+          <div class="timeline-desc">{{ item.description }}</div>
+          {% endif %}
+        </div>
+        <div class="timeline-side">
+          <div>{{ item.subsidiary }}</div>
+          {% if item.amount %}<div>{{ item.amount }}</div>{% endif %}
+          <div class="status">{{ item.status }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="timeline-empty">No activity matched the current filters.</div>
+    {% endif %}
+  </div>
+
+  <!-- â”€â”€ PENDING APPROVAL AGING â”€â”€ -->
+  <div class="section-title">Pending Approval Aging</div>
+  <div class="aging-grid">
+    <div class="aging-card">
+      <h3>{{ d.pending_aging_total }} pending requests by age</h3>
+      <div class="aging-buckets">
+        {% for row in d.pending_aging %}
+        <div class="aging-row">
+          <div class="aging-label">{{ row.label }}</div>
+          <div>
+            <div class="aging-bar"><div class="aging-fill" style="width:{{ row.share }}%"></div></div>
+            <div class="aging-amount">{{ row.amount_label }}</div>
+          </div>
+          <div class="aging-count">{{ row.count }} · {{ row.share }}%</div>
+        </div>
+        <div class="aging-module-grid">
+          <div class="aging-module"><span>Leave</span><strong>{{ row.leave }}</strong></div>
+          <div class="aging-module"><span>Cash Adv</span><strong>{{ row.cash_advance }}</strong></div>
+          <div class="aging-module"><span>Expense</span><strong>{{ row.expense_claim }}</strong></div>
+          <div class="aging-module"><span>RTPS</span><strong>{{ row.rtps }}</strong></div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="aging-card">
+      <h3>Oldest pending requests{% if d.oldest_pending_days %} · {{ d.oldest_pending_days }} days max{% endif %}</h3>
+      {% if d.oldest_pending %}
+      <div class="oldest-list">
+        {% for item in d.oldest_pending %}
+        <div class="oldest-item">
+          <div class="oldest-age">{{ item.days }}<span>days</span></div>
+          <div class="oldest-main">
+            <div class="oldest-meta">{{ item.module }} · {{ item.created }}</div>
+            <div class="oldest-title">{{ item.title }}</div>
+            {% if item.description %}<div class="oldest-desc">{{ item.description }}</div>{% endif %}
+          </div>
+          <div class="oldest-side">
+            <div>{{ item.subsidiary }}</div>
+            {% if item.amount %}<div>{{ item.amount }}</div>{% endif %}
+            <div class="stage">Waiting: {{ item.waiting_on }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="timeline-empty">No pending approvals matched the current filters.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- â”€â”€ KPI OVERVIEW â”€â”€ -->
   <div class="section-title">Overview</div>
   <div class="kpi-grid">
     <div class="kpi" style="--accent:#1155cc">
@@ -771,28 +1643,28 @@ TEMPLATE = """
     <div class="kpi" style="--accent:#1d6ff2">
       <div class="label">Cash Advances</div>
       <div class="value">{{ d.ca_approved }}/{{ d.ca_total }}</div>
-      <div class="sub">₦{{ "{:,.0f}".format(d.ca_amount) }} total</div>
+      <div class="sub">â‚¦{{ "{:,.0f}".format(d.ca_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#4c93ff">
       <div class="label">Expense Claims</div>
       <div class="value">{{ d.ec_approved }}/{{ d.ec_total }}</div>
-      <div class="sub">₦{{ "{:,.0f}".format(d.ec_amount) }} total</div>
+      <div class="sub">â‚¦{{ "{:,.0f}".format(d.ec_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ec_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ec_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#0b3a75">
       <div class="label">RTPS</div>
       <div class="value">{{ d.rtps_approved }}/{{ d.rtps_total }}</div>
-      <div class="sub">₦{{ "{:,.0f}".format(d.rtps_amount) }} total</div>
+      <div class="sub">â‚¦{{ "{:,.0f}".format(d.rtps_amount) }} total</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.rtps_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.rtps_pending_amount) }}</strong></div>
       </div>
     </div>
     <div class="kpi" style="--accent:#8fc3ff">
@@ -802,16 +1674,16 @@ TEMPLATE = """
     </div>
     <div class="kpi" style="--accent:#082f63">
       <div class="label">Total Spend</div>
-      <div class="value" style="font-size:20px">₦{{ "{:,.0f}".format(d.total_spend) }}</div>
+      <div class="value" style="font-size:20px">â‚¦{{ "{:,.0f}".format(d.total_spend) }}</div>
       <div class="sub">CA + EC + RTPS</div>
       <div class="amount-breakdown">
-        <div><span>Approved</span><strong>₦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
-        <div><span>Waiting approval</span><strong>₦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
+        <div><span>Approved</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_approved_amount + d.ec_approved_amount + d.rtps_approved_amount) }}</strong></div>
+        <div><span>Waiting approval</span><strong>â‚¦{{ "{:,.0f}".format(d.ca_pending_amount + d.ec_pending_amount + d.rtps_pending_amount) }}</strong></div>
       </div>
     </div>
   </div>
 
-  <!-- ── LEAVE REQUESTS ── -->
+  <!-- â”€â”€ LEAVE REQUESTS â”€â”€ -->
   <div class="section-title">Leave Requests</div>
   <div class="chart-grid-3">
     <div class="chart-card">{{ charts.leave_by_sub | safe }}</div>
@@ -822,7 +1694,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.leave_trend | safe }}</div>
   </div>
 
-  <!-- ── CASH ADVANCE ── -->
+  <!-- â”€â”€ CASH ADVANCE â”€â”€ -->
   <div class="section-title">Cash Advance</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.ca_by_sub | safe }}</div>
@@ -832,7 +1704,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.ca_trend | safe }}</div>
   </div>
 
-  <!-- ── EXPENSE CLAIMS ── -->
+  <!-- â”€â”€ EXPENSE CLAIMS â”€â”€ -->
   <div class="section-title">Expense Claims</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.ec_by_sub | safe }}</div>
@@ -842,7 +1714,7 @@ TEMPLATE = """
     <div class="chart-card full">{{ charts.ec_trend | safe }}</div>
   </div>
 
-  <!-- ── RTPS ── -->
+  <!-- â”€â”€ RTPS â”€â”€ -->
   <div class="section-title">Request to Pay Supplier (RTPS)</div>
   <div class="chart-grid-2">
     <div class="chart-card">{{ charts.rtps_by_sub | safe }}</div>
@@ -853,7 +1725,7 @@ TEMPLATE = """
     <div class="chart-card">{{ charts.rtps_trend | safe }}</div>
   </div>
 
-  <!-- ── APPROVAL RATES ── -->
+  <!-- â”€â”€ APPROVAL RATES â”€â”€ -->
   <div class="section-title">Approval Rates</div>
   <div class="chart-card">
     <table class="approval-table">
@@ -899,7 +1771,7 @@ TEMPLATE = """
   function getDisabledPeriodOption() {
     let option = periodFilter.querySelector(`option[value="${periodDisabledValue}"]`);
     if (!option) {
-      option = new Option("🚫 Date range active", periodDisabledValue);
+      option = new Option("Date range active", periodDisabledValue);
       periodFilter.insertBefore(option, periodFilter.firstChild);
     }
     return option;
@@ -1010,21 +1882,12 @@ ERROR_TEMPLATE = """
 </html>
 """
 
-# ── Route ─────────────────────────────────────────────────────────────────────
+# â”€â”€ Route â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@app.route("/")
-def dashboard():
+def dashboard_payload():
     now = app_now().strftime("%d %b %Y, %H:%M")
-    try:
-        db      = get_db()
-        sub_map = get_subsidiary_map(db)
-    except (RuntimeError, ConfigurationError, ServerSelectionTimeoutError, PyMongoError) as exc:
-        return render_template_string(
-            ERROR_TEMPLATE,
-            error_message=str(exc),
-            now=now,
-        ), 500
-
+    db = get_db()
+    sub_map = get_subsidiary_map(db)
     requested_period = request.args.get("period", "all")
     if requested_period not in {"all", "today", "week", "month", "quarter", "year", "date_active"}:
         requested_period = "all"
@@ -1053,8 +1916,120 @@ def dashboard():
         "period_filter_active": period_filter_active,
     }
     sub_options = sorted(set(sub_map.values()))
+    d = load_all(db, sub_map, filters)
+    return now, filters, sub_options, d
+
+
+def build_executive_pdf(d, filters, now):
+    import io
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    def pdf_text(value):
+        return escape(str(value or ""))
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle("ExecTitle", parent=styles["Title"], fontSize=18, textColor=colors.HexColor("#082f63"))
+    section = ParagraphStyle("ExecSection", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#082f63"), spaceBefore=12)
+    body = ParagraphStyle("ExecBody", parent=styles["BodyText"], fontSize=9, leading=12)
+    small = ParagraphStyle("ExecSmall", parent=styles["BodyText"], fontSize=8, leading=10, textColor=colors.HexColor("#456489"))
+
+    story = [
+        Paragraph("IGEZ Executive Analytics Brief", title),
+        Paragraph(f"Generated: {pdf_text(now)} | Period: {pdf_text(filters.get('period', 'all'))} | Subsidiary: {pdf_text(filters.get('subsidiary', 'All'))}", small),
+        Spacer(1, 10),
+    ]
+    kpis = [
+        ["Health", f"{d['health']['status']} ({d['health']['score']}/100)"],
+        ["Approved Spend", f"NGN {d['approved_spend']:,.0f}"],
+        ["Waiting Approval", f"NGN {d['pending_spend']:,.0f}"],
+        ["This Month Spend", f"NGN {d['month_compare']['spend']:,.0f}"],
+        ["Total Requests", f"{d['total_approved_requests']}/{d['total_requests']} approved"],
+        ["Oldest Pending", f"{d['oldest_pending_days']} days"],
+    ]
+    table = Table(kpis, colWidths=[150, 330])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#082f63")),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("BACKGROUND", (1, 0), (1, -1), colors.HexColor("#f3f8ff")),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#c7ddf6")),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("PADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([table, Spacer(1, 10), Paragraph("Executive Summary", section)])
+    for insight in d["insights"]:
+        story.append(Paragraph(f"- {pdf_text(insight)}", body))
+
+    story.append(Paragraph("Action Required Today", section))
+    if d["action_required"]:
+        action_rows = [["Item", "Why", "Owner"]]
+        for item in d["action_required"]:
+            action_rows.append([pdf_text(item["title"]), pdf_text(item["why"]), pdf_text(item["waiting_on"])])
+        actions = Table(action_rows, colWidths=[170, 230, 80])
+        actions.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0b3a75")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#c7ddf6")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(actions)
+    else:
+        story.append(Paragraph("No urgent pending actions matched the current filters.", body))
+
+    story.append(Paragraph("Rejection Analytics", section))
+    for item in d["rejection_analytics"]:
+        story.append(Paragraph(
+            f"- {pdf_text(item['module'])}: {item['rate']}% rejected; {pdf_text(item['amount_label'])} rejected value.",
+            body,
+        ))
+
+    story.append(Paragraph("Month-End Close View", section))
+    close = d["month_end_close"]
+    story.append(Paragraph(
+        f"{close['days_left']} days left; {pdf_text(close['pending_label'])} pending; {close['blockers']} stale blockers; {pdf_text(close['unclassified_label'])} unclassified.",
+        body,
+    ))
+
+    story.append(Paragraph("Suspicious Requests", section))
+    suspicious = d["suspicious_requests"] or [{"owner": "None", "reason": "No same-owner, same-amount repeat requests detected."}]
+    for item in suspicious[:5]:
+        story.append(Paragraph(f"- {pdf_text(item['owner'])}: {pdf_text(item['reason'])}", body))
+
+    story.append(Paragraph("Data Quality Notes", section))
+    warnings = d["data_quality_warnings"] or ["No major data-quality warnings in this view."]
+    for warning in warnings:
+        story.append(Paragraph(f"- {pdf_text(warning)}", body))
+
+    story.append(Paragraph("Spend Risk Alerts", section))
+    alerts = d["risk_alerts"] or ["No major spend risk alerts in this view."]
+    for alert in alerts:
+        story.append(Paragraph(f"- {pdf_text(alert)}", body))
+
+    story.append(Paragraph("Top Subsidiary Scorecards", section))
+    for item in d["subsidiary_scorecards"][:5]:
+        story.append(Paragraph(
+            f"{pdf_text(item['subsidiary'])}: {pdf_text(item['spend_label'])} total spend; {pdf_text(item['pending_label'])} waiting; oldest pending {item['oldest_days']} days.",
+            body,
+        ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/")
+def dashboard():
+    now = app_now().strftime("%d %b %Y, %H:%M")
     try:
-        d       = load_all(db, sub_map, filters)
+        now, filters, sub_options, d = dashboard_payload()
     except (PyMongoError, RuntimeError, ValueError) as exc:
         return render_template_string(
             ERROR_TEMPLATE,
@@ -1081,47 +2056,73 @@ def dashboard():
                                    "Leave Status")
     charts["leave_trend"]   = line(list(d["leave_by_month"].keys()),
                                     list(d["leave_by_month"].values()),
-                                    "Leave Requests — Monthly Trend", BLUE)
+                                    "Leave Requests â€” Monthly Trend", BLUE)
 
     # Cash Advance
     charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()),
                                 list(d["ca_by_sub"].values()),
-                                "Cash Advance Amount by Subsidiary (₦)", BLUE_LIGHT)
+                                "Cash Advance Amount by Subsidiary (â‚¦)", BLUE_LIGHT)
     charts["ca_status"]  = pie(["Approved","Pending"],
                                 [d["ca_approved"], d["ca_pending"]],
                                 "Cash Advance Status")
     charts["ca_trend"]   = line(list(d["ca_by_month"].keys()),
                                  list(d["ca_by_month"].values()),
-                                 "Cash Advance — Monthly Trend (₦)", BLUE_LIGHT)
+                                 "Cash Advance â€” Monthly Trend (â‚¦)", BLUE_LIGHT)
 
     # Expense Claims
     charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()),
                                 list(d["ec_by_sub"].values()),
-                                "Expense Claims Amount by Subsidiary (₦)", BLUE_SOFT)
+                                "Expense Claims Amount by Subsidiary (â‚¦)", BLUE_SOFT)
     charts["ec_status"]  = pie(["Approved","Pending"],
                                 [d["ec_approved"], d["ec_pending"]],
                                 "Expense Claim Status")
     charts["ec_trend"]   = line(list(d["ec_by_month"].keys()),
                                  list(d["ec_by_month"].values()),
-                                 "Expense Claims — Monthly Trend (₦)", BLUE_SOFT)
+                                 "Expense Claims â€” Monthly Trend (â‚¦)", BLUE_SOFT)
 
     # RTPS
     charts["rtps_by_sub"]   = bar(list(d["rtps_by_sub"].keys()),
                                    list(d["rtps_by_sub"].values()),
-                                   "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
+                                   "RTPS Amount by Subsidiary (â‚¦)", BLUE_DEEP)
     charts["rtps_by_mode"]  = pie(list(d["rtps_by_mode"].keys()),
                                    list(d["rtps_by_mode"].values()),
                                    "Payment Mode")
     charts["rtps_suppliers"]= hbar(list(d["rtps_by_supplier"].values()),
                                     list(d["rtps_by_supplier"].keys()),
-                                    "Top 10 Suppliers by Amount (₦)", BLUE_DEEP)
+                                    "Top 10 Suppliers by Amount (â‚¦)", BLUE_DEEP)
     charts["rtps_trend"]    = line(list(d["rtps_by_month"].keys()),
                                     list(d["rtps_by_month"].values()),
-                                    "RTPS — Monthly Trend (₦)", BLUE_DEEP)
+                                    "RTPS â€” Monthly Trend (â‚¦)", BLUE_DEEP)
 
     return render_template_string(
-        TEMPLATE, d=d, charts=charts, now=now, filters=filters, sub_options=sub_options
+        TEMPLATE,
+        d=d,
+        charts=charts,
+        now=now,
+        filters=filters,
+        sub_options=sub_options,
+        report_query=request.query_string.decode("utf-8"),
     )
+
+
+@app.route("/executive-report")
+def executive_report():
+    now = app_now().strftime("%d %b %Y, %H:%M")
+    try:
+        now, filters, _sub_options, d = dashboard_payload()
+        pdf = build_executive_pdf(d, filters, now)
+        return send_file(
+            pdf,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"igez-executive-brief-{app_now().strftime('%Y-%m-%d')}.pdf",
+        )
+    except (PyMongoError, RuntimeError, ValueError, ImportError) as exc:
+        return render_template_string(
+            ERROR_TEMPLATE,
+            error_message=str(exc),
+            now=now,
+        ), 500
 
 
 if __name__ == "__main__":
