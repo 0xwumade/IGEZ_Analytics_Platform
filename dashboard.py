@@ -50,10 +50,15 @@ def get_db():
     return client["Paperless_app_prod"]
 
 
+# Names that are test/placeholder subsidiaries — excluded everywhere
+_EXCLUDED_SUBSIDIARIES = {"testing", "test"}
+
+
 def get_subsidiary_map(db):
     return {
         str(s["_id"]): s.get("subsidiary_name", "Unknown")
         for s in db["Subsidiary"].find({})
+        if s.get("subsidiary_name", "").strip().lower() not in _EXCLUDED_SUBSIDIARIES
     }
 
 
@@ -62,7 +67,11 @@ def normalize_cbc_text(value):
 
 
 def resolve_sub(sub_id, sub_map):
-    return normalize_cbc_text(sub_map.get(str(sub_id), "Unknown"))
+    name = normalize_cbc_text(sub_map.get(str(sub_id), "Unknown"))
+    # Treat excluded/test subsidiaries as Unknown so their records are filtered out
+    if name.strip().lower() in _EXCLUDED_SUBSIDIARIES:
+        return "Unknown"
+    return name
 
 
 def safe_amount(val):
