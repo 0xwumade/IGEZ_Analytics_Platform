@@ -1,4 +1,4 @@
-"""
+﻿"""
 dashboard.py
 ------------
 Analytics dashboard for CBC Paperless App.
@@ -14,7 +14,7 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import ConfigurationError, PyMongoError, ServerSelectionTimeoutError
-from flask import Flask, render_template_string, request, send_file
+from flask import Flask, render_template_string, request, send_file, redirect
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -22,11 +22,19 @@ import json
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 DB_URL = os.getenv("DATABASE_URL")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Africa/Lagos")
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 UTC_TZ = ZoneInfo("UTC")
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 # DB helpers and data processing functions for the dashboard analytics
 
@@ -144,7 +152,7 @@ def format_change(value):
 
 
 def format_money(value):
-    return f"₦{value:,.0f}" if value else ""
+    return f"NGN {value:,.0f}" if value else ""
 
 # Data loaders and analytics computations for the dashboard
 
@@ -921,6 +929,162 @@ def load_all(db, sub_map, filters=None):
         reverse=True,
     )[:8]
 
+    high_risk_count = len([
+        item for item in pending_items
+        if item["amount_value"] >= 5_000_000 or item["days"] >= 8 or item["waiting_on"] in {"CEO", "COO", "Chairman"}
+    ])
+    ceo_pending = len([item for item in pending_items if item["waiting_on"] == "CEO"])
+    active_vendors = len([name for name, amount in rtps_by_supplier.items() if amount])
+    turnaround_days = round(sum(item["days"] for item in pending_items) / len(pending_items), 1) if pending_items else 0
+
+    data["executive_kpis"] = [
+        {
+            "label": "Total Pending Requests",
+            "value": f"{len(pending_items):,}",
+            "change": data["month_compare"]["requests_change"],
+            "trend": "up" if data["month_compare"]["requests_change_value"] >= 0 else "down",
+            "status": "warn" if len(pending_items) else "good",
+            "target": "pending-approvals",
+            "note": "Across approvals, escalations, and operational queues.",
+        },
+        {
+            "label": "Total Pending Amount",
+            "value": format_money(pending_spend) or "NGN 0",
+            "change": f"{data['health']['pending_ratio']}% exposure",
+            "trend": "up" if data["health"]["pending_ratio"] >= 20 else "flat",
+            "status": "danger" if data["health"]["pending_ratio"] >= 40 else "warn" if data["health"]["pending_ratio"] >= 20 else "good",
+            "target": "pending-approvals",
+            "note": "Unapproved financial value waiting for action.",
+        },
+        {
+            "label": "CEO Pending Approvals",
+            "value": f"{ceo_pending:,}",
+            "change": "CEO queue",
+            "trend": "flat",
+            "status": "danger" if ceo_pending else "good",
+            "target": "pending-approvals",
+            "note": "Items currently waiting at CEO level.",
+        },
+        {
+            "label": "Longest Aging Request",
+            "value": f"{data['oldest_pending_days']} days",
+            "change": "oldest item",
+            "trend": "up" if data["oldest_pending_days"] >= 8 else "flat",
+            "status": "danger" if data["oldest_pending_days"] >= 15 else "warn" if data["oldest_pending_days"] >= 8 else "good",
+            "target": "audit-risk",
+            "note": "Maximum waiting time among pending records.",
+        },
+        {
+            "label": "Approval Turnaround",
+            "value": f"{turnaround_days} days",
+            "change": "avg pending age",
+            "trend": "down" if turnaround_days <= 3 else "up",
+            "status": "warn" if turnaround_days > 5 else "good",
+            "target": "audit-risk",
+            "note": "Average age of currently pending items.",
+        },
+        {
+            "label": "High-Risk Transactions",
+            "value": f"{high_risk_count:,}",
+            "change": "risk rules",
+            "trend": "up" if high_risk_count else "flat",
+            "status": "danger" if high_risk_count else "good",
+            "target": "audit-risk",
+            "note": "High-value, delayed, or executive-stage requests.",
+        },
+        {
+            "label": "Total Spend by Period",
+            "value": format_money(total_spend) or "NGN 0",
+            "change": data["month_compare"]["spend_change"],
+            "trend": "up" if data["month_compare"]["spend_change_value"] >= 0 else "down",
+            "status": "warn" if data["month_compare"]["spend_change_value"] >= 25 else "good",
+            "target": "rtps-analytics",
+            "note": "Cash advance, expense claim, and RTPS spend.",
+        },
+        {
+            "label": "Active Vendors",
+            "value": f"{active_vendors:,}",
+            "change": "top supplier set",
+            "trend": "flat",
+            "status": "good",
+            "target": "vendor-insights",
+            "note": "Suppliers represented in the current RTPS view.",
+        },
+        {
+            "label": "Subsidiary Performance",
+            "value": data["top_spending_subsidiary"],
+            "change": format_money(data["top_spending_subsidiary_amount"]) or "NGN 0",
+            "trend": "flat",
+            "status": "warn" if data["top_spending_subsidiary_amount"] else "good",
+            "target": "subsidiaries",
+            "note": "Highest spend concentration in the selected view.",
+        },
+    ]
+
+    def table_date(record):
+        dt = record_date(record)
+        return dt.strftime("%Y-%m-%d") if dt else "Unknown"
+
+    def table_status(record):
+        status = str(record.get("status", "") or "Unclassified").strip()
+        return status.title() if status else "Unclassified"
+
+    operational_rows = []
+
+    def add_table_rows(module, records, staff_fn, vendor_fn, amount_fn, stages):
+        for record in records:
+            amount = amount_fn(record)
+            days = pending_age_days(record) if status_group(record) == "pending" else 0
+            waiting = next_stage(record, stages) if status_group(record) == "pending" else "Complete"
+            priority = "High" if amount >= 5_000_000 or days >= 8 or waiting in {"CEO", "COO", "Chairman"} else "Normal"
+            operational_rows.append({
+                "date": table_date(record),
+                "request_id": record_id(record)[-8:] or "Unknown",
+                "staff": short_text(staff_fn(record), 34),
+                "vendor": short_text(vendor_fn(record), 38),
+                "amount": format_money(amount) or "NGN 0",
+                "amount_value": amount,
+                "status": table_status(record),
+                "aging": f"{days} days" if days else "-",
+                "aging_days": days,
+                "approval_level": waiting,
+                "module": module,
+                "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
+                "priority": priority,
+                "details": short_text(record.get("justification", ""), 150),
+            })
+
+    add_table_rows("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: "Cash Advance", lambda r: safe_amount(r.get("amount", 0)), finance_stages)
+    add_table_rows("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), lambda r: "Expense Claim", ec_total_amount, finance_stages)
+    add_table_rows("RTPS", rtps, lambda r: requester(r, "staff_name", "name"), lambda r: normalize_cbc_text(r.get("name_of_supplier", "Supplier")), lambda r: safe_amount(r.get("amount", 0)), finance_stages)
+    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: normalize_cbc_text(r.get("leave_Details", "Leave")), lambda r: 0, leave_stages)
+    data["operational_rows"] = sorted(
+        operational_rows,
+        key=lambda row: (row["status"] == "Pending", row["aging_days"], row["amount_value"]),
+        reverse=True,
+    )[:250]
+
+    data["alert_center"] = []
+    for item in data["action_required"][:4]:
+        data["alert_center"].append({
+            "type": "Overdue approval" if item["days"] >= 8 else "Pending approval",
+            "priority": "High" if item["priority_score"] >= 55 else "Medium",
+            "message": f"{item['module']} for {item['subsidiary']} is waiting on {item['waiting_on']}.",
+        })
+    for alert in data["risk_alerts"][:3]:
+        data["alert_center"].append({"type": "Risk anomaly", "priority": "High", "message": alert})
+    for item in data["suspicious_requests"][:2]:
+        data["alert_center"].append({"type": "Duplicate payment", "priority": "Medium", "message": item["reason"]})
+
+    search_terms = set()
+    for row in data["operational_rows"][:120]:
+        for key in ("vendor", "request_id", "staff", "subsidiary", "module", "status", "approval_level", "priority"):
+            value = str(row.get(key, "")).strip()
+            if value and value != "-":
+                search_terms.add(value)
+    search_terms.update(["Pending approvals above NGN 10M", "CEO Attention", "Overdue approvals", "High-risk transactions", "Export reports"])
+    data["smart_search_terms"] = sorted(search_terms)[:80]
+
     data["beginner_explainers"] = [
         {"term": "Waiting Approval", "meaning": "Money or requests submitted but not fully cleared by the approval chain."},
         {"term": "Approval Rate", "meaning": "The share of requests that have been approved at each stage."},
@@ -1319,11 +1483,19 @@ TEMPLATE = """
 <body>
 
 <div class="header">
-  <div>
-    <div class="h1">IGEZ - Analytics Dashboard</div>
-    <div class="sub">Live data from MongoDB - Last refreshed: {{ now }}</div>
+  <div style="display:flex; align-items:center; gap:18px;">
+    <img src="/static/cbc_logo.png" alt="CBC Logo"
+         style="height:52px; width:52px; border-radius:10px; object-fit:contain;">
+    <div>
+      <div style="font-size:11px; font-weight:600; letter-spacing:2px; opacity:0.7; text-transform:uppercase; margin-bottom:2px;">CBC · Powered by IGEZ</div>
+      <div class="h1">IGEZ Analytics Dashboard</div>
+      <div class="sub">CBC Paperless · Live data from MongoDB · Last refreshed: {{ now }}</div>
+    </div>
   </div>
-  <a href="/" class="refresh-btn">Refresh</a>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <a href="/executive-report" class="refresh-btn" style="background:rgba(255,255,255,0.12);">&#x1F4C4; Executive Report</a>
+    <a href="/" class="refresh-btn">&#x21BB; Refresh</a>
+  </div>
 </div>
 
 <div class="container">
@@ -1877,6 +2049,759 @@ TEMPLATE = """
 </html>
 """
 
+EXEC_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IGEZ Executive Analytics</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f5f7fb; --panel: #ffffff; --ink: #132033; --muted: #667085;
+    --line: #dde5ef; --brand: #174ea6; --brand-2: #0f766e;
+    --warn: #b45309; --danger: #b42318; --good: #027a48;
+    --shadow: 0 16px 40px rgba(16, 24, 40, 0.09);
+  }
+  body.dark {
+    --bg: #0f172a; --panel: #182235; --ink: #f8fafc; --muted: #a8b3c7;
+    --line: #2a374d; --shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
+  }
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    min-width: 320px;
+  }
+  a { color: inherit; text-decoration: none; }
+  button, input, select { font: inherit; }
+  .app-shell { display: block; min-height: 100vh; }
+  .main { min-width: 0; }
+  .topbar {
+    position: sticky; top: 0; z-index: 20; background: rgba(245,247,251,0.92);
+    backdrop-filter: blur(18px); border-bottom: 1px solid var(--line);
+  }
+  body.dark .topbar { background: rgba(15,23,42,0.92); }
+  .topbar-inner {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 18px;
+  }
+  .top-actions { display: flex; gap: 8px; align-items: center; }
+  .icon-btn, .btn, .chip {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 8px; min-height: 36px; padding: 8px 11px; cursor: pointer;
+    font-size: 12px; font-weight: 800;
+  }
+  .btn.primary { background: var(--brand); color: white; border-color: var(--brand); }
+  .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; height: 21px; border-radius: 999px; background: var(--danger); color: white; font-size: 11px; }
+  .tabs {
+    display: flex; gap: 6px; overflow-x: auto; padding: 0 18px 12px; scrollbar-width: thin;
+  }
+  .tabs a {
+    white-space: nowrap; border: 1px solid var(--line); background: var(--panel);
+    border-radius: 999px; padding: 7px 11px; color: var(--muted); font-size: 12px; font-weight: 800;
+  }
+  .tabs a:hover, .tabs a.active { color: white; background: var(--brand); border-color: var(--brand); }
+  .content { padding: 18px; max-width: 1560px; margin: 0 auto; }
+  /* Executive Insights full-width card */
+  .exec-insight-card {
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(16,24,40,0.16);
+    margin-bottom: 4px;
+  }
+  .exec-insight-empty {
+    background: linear-gradient(160deg, #061b3a 0%, #082f63 55%, #0e3f85 100%);
+    display: grid; place-items: center; text-align: center;
+    padding: 56px 32px 48px; min-height: 340px;
+  }
+  .ready-orb {
+    width: 136px; height: 136px; border-radius: 50%;
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255,255,255,0.82), transparent 0 12%, transparent 26%),
+      radial-gradient(circle at 50% 52%, rgba(76,147,255,0.88), rgba(17,85,204,0.42) 38%, rgba(8,47,99,0.26) 64%, rgba(255,255,255,0.10));
+    box-shadow: 0 0 52px rgba(76,147,255,0.65), inset -18px -22px 34px rgba(0,0,0,0.34), inset 16px 16px 28px rgba(255,255,255,0.16);
+    opacity: 0.92; margin: 0 auto 24px;
+    animation: readyPulse 3.2s ease-in-out infinite;
+  }
+  .ready-title {
+    color: #e5e7eb; font-size: 22px; font-weight: 700; letter-spacing: 0;
+    text-shadow: 0 12px 30px rgba(0,0,0,0.32); margin-bottom: 10px;
+  }
+  .ready-copy {
+    max-width: 520px; margin: 0 auto; color: #b7c4d6; font-size: 14px; line-height: 1.6;
+  }
+  @keyframes readyPulse {
+    0%, 100% { transform: scale(0.97); box-shadow: 0 0 32px rgba(76,147,255,0.40), inset -18px -22px 34px rgba(0,0,0,0.34), inset 16px 16px 28px rgba(255,255,255,0.12); }
+    50% { transform: scale(1.03); box-shadow: 0 0 68px rgba(76,147,255,0.78), inset -18px -22px 34px rgba(0,0,0,0.28), inset 16px 16px 28px rgba(255,255,255,0.18); }
+  }
+  .exec-insight-active {
+    background: linear-gradient(135deg, #061b3a 0%, #082f63 45%, #0e3f85 78%, #1155cc 100%);
+    padding: 28px 32px 24px;
+    color: white;
+  }
+  .ei-label {
+    font-size: 11px; font-weight: 900; letter-spacing: 2px; text-transform: uppercase;
+    color: #8fc3ff; margin-bottom: 6px;
+  }
+  .exec-insight-empty .ei-label { margin-bottom: 28px; }
+  .ei-header {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .ei-health-badge {
+    display: inline-block; margin-top: 6px; padding: 4px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 900; letter-spacing: 0.5px;
+  }
+  .ei-health-good { background: rgba(2,122,72,0.28); color: #6ee7b7; border: 1px solid rgba(110,231,183,0.3); }
+  .ei-health-watch { background: rgba(180,83,9,0.28); color: #fcd34d; border: 1px solid rgba(252,211,77,0.3); }
+  .ei-health-needs-attention { background: rgba(180,35,24,0.28); color: #fca5a5; border: 1px solid rgba(252,165,165,0.3); }
+  .ei-pdf-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 800;
+    background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.28);
+    color: white; text-decoration: none; white-space: nowrap;
+    transition: background 0.18s;
+  }
+  .ei-pdf-btn:hover { background: rgba(255,255,255,0.24); }
+  .ei-meter-wrap {
+    display: flex; align-items: center; gap: 14px; margin-bottom: 22px; flex-wrap: wrap;
+  }
+  .ei-meter {
+    flex: 1; min-width: 160px; height: 7px; background: rgba(255,255,255,0.14);
+    border-radius: 999px; overflow: hidden;
+  }
+  .ei-meter-fill {
+    height: 100%; border-radius: inherit;
+    background: linear-gradient(90deg, #4c93ff, #8fc3ff, #ffffff);
+  }
+  .ei-meter-note { color: #b7c4d6; font-size: 12px; line-height: 1.4; }
+  .ei-body {
+    display: grid; grid-template-columns: 1.1fr 0.9fr 1fr; gap: 24px;
+  }
+  .ei-col-title {
+    font-size: 11px; font-weight: 900; letter-spacing: 1.5px; text-transform: uppercase;
+    color: #8fc3ff; margin-bottom: 12px;
+  }
+  .ei-insights-list {
+    list-style: none; padding: 0; margin: 0; display: grid; gap: 0;
+  }
+  .ei-insights-list li {
+    font-size: 13px; color: #dbeafe; line-height: 1.5;
+    padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,0.10);
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+  .ei-insights-list li::before {
+    content: "›"; color: #4c93ff; font-size: 15px; flex-shrink: 0; margin-top: -1px;
+  }
+  .ei-insights-list li:last-child { border-bottom: 0; }
+  .ei-stat-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .ei-stat {
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .ei-stat span { display: block; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; color: #8fc3ff; margin-bottom: 6px; }
+  .ei-stat strong { display: block; font-size: 16px; font-weight: 900; color: #ffffff; line-height: 1.2; overflow-wrap: anywhere; }
+  .ei-bottleneck-list { display: grid; gap: 0; }
+  .ei-bottleneck-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,0.10);
+  }
+  .ei-bottleneck-row:last-child { border-bottom: 0; }
+  .ei-bottleneck-info { min-width: 0; }
+  .ei-bottleneck-label { display: block; font-size: 13px; font-weight: 800; color: #dbeafe; }
+  .ei-bottleneck-impact { display: block; font-size: 11px; color: #8fc3ff; margin-top: 2px; line-height: 1.35; }
+  .ei-bottleneck-count {
+    flex-shrink: 0; min-width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(76,147,255,0.22); border: 1px solid rgba(76,147,255,0.4);
+    border-radius: 8px; font-size: 15px; font-weight: 900; color: #ffffff;
+  }
+  /* Filter context strip inside executive insights */
+  .ei-filter-strip {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;
+  }
+  .ei-filter-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 11px; border-radius: 999px; font-size: 11px; font-weight: 900;
+    background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.26);
+    color: #dbeafe; letter-spacing: 0.3px;
+  }
+  /* Rich search result cards */
+  .suggestion {
+    padding: 9px 10px; border-radius: 7px; color: var(--ink); cursor: pointer; font-size: 13px;
+  }
+  .suggestion:hover { background: rgba(23,78,166,0.10); }
+  .suggestion.rich-result {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
+    padding: 10px 12px; border-radius: 8px; border-bottom: 1px solid var(--line);
+  }
+  .suggestion.rich-result:last-child { border-bottom: 0; }
+  .suggestion.rich-result:hover { background: rgba(23,78,166,0.07); }
+  .sr-module {
+    min-width: 68px; padding: 3px 7px; border-radius: 6px; text-align: center;
+    font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px;
+    background: rgba(23,78,166,0.12); color: var(--brand);
+  }
+  .sr-body { min-width: 0; }
+  .sr-staff { font-size: 13px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
+  .sr-meta { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+  .sr-right { text-align: right; white-space: nowrap; }
+  .sr-amount { font-size: 13px; font-weight: 800; color: var(--ink); }
+  .sr-status { font-size: 11px; margin-top: 3px; font-weight: 700; }
+  .sr-status.pending { color: var(--warn); }
+  .sr-status.approved { color: var(--good); }
+  .sr-status.rejected { color: var(--danger); }
+  .search-empty { padding: 14px 12px; color: var(--muted); font-size: 13px; text-align: center; }
+  .search-loading { padding: 14px 12px; color: var(--muted); font-size: 13px; text-align: center; }
+  /* Responsive executive insights */
+  @media (max-width: 900px) {
+    .ei-body { grid-template-columns: 1fr; gap: 18px; }
+    .exec-insight-active { padding: 20px 18px; }
+  }
+  .hero-panel, .panel, details.analytics {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+  }
+  .eyebrow { color: var(--brand); font-size: 12px; font-weight: 900; text-transform: uppercase; }
+  h1 { margin-top: 6px; font-size: 28px; line-height: 1.15; letter-spacing: 0; }
+  .subtle { color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .filter-dock {
+    position: sticky; top: 101px; z-index: 15; margin-top: 0; margin-bottom: 14px; padding: 12px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto; gap: 10px;
+    background: rgba(255,255,255,0.92); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+  }
+  body.dark .filter-dock { background: rgba(24,34,53,0.94); }
+  .filter-dock label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 900; text-transform: uppercase; }
+  .filter-dock select, .filter-dock input {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 8px 9px; background: var(--panel); color: var(--ink);
+  }
+  .filter-hint { grid-column: 1 / -1; min-height: 16px; color: var(--danger); font-size: 12px; font-weight: 700; }
+  .chip.active { background: var(--brand); color: white; border-color: var(--brand); }
+  .section { scroll-margin-top: 172px; margin-top: 18px; }
+  .section-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .section-head h2 { font-size: 16px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+  .kpi {
+    cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px; min-height: 142px; box-shadow: var(--shadow); display: grid; gap: 7px;
+  }
+  .kpi:hover { transform: translateY(-1px); border-color: rgba(23,78,166,0.45); }
+  .kpi .label { color: var(--muted); font-size: 11px; font-weight: 900; text-transform: uppercase; }
+  .kpi .value { font-size: 26px; font-weight: 900; line-height: 1.05; overflow-wrap: anywhere; }
+  .trend { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 900; }
+  .status-good .trend { background: rgba(2,122,72,0.12); color: var(--good); }
+  .status-warn .trend { background: rgba(180,83,9,0.14); color: var(--warn); }
+  .status-danger .trend { background: rgba(180,35,24,0.12); color: var(--danger); }
+  .panel { padding: 14px; }
+  .grid-2 { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .list { display: grid; gap: 8px; }
+  .item { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: rgba(23,78,166,0.03); }
+  .item strong { display: block; font-size: 13px; }
+  .item span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+  details.analytics { overflow: hidden; margin-top: 12px; }
+  details.analytics > summary {
+    list-style: none; cursor: pointer; padding: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center;
+  }
+  details.analytics > summary::-webkit-details-marker { display: none; }
+  .analytics-body { padding: 0 14px 14px; border-top: 1px solid var(--line); }
+  .chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  .chart-box { min-height: 340px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; overflow: hidden; }
+  .table-tools { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .table-wrap { overflow: auto; max-height: 560px; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 980px; }
+  th { position: sticky; top: 0; background: #101828; color: white; padding: 10px; text-align: left; cursor: pointer; z-index: 1; }
+  td { border-bottom: 1px solid var(--line); padding: 9px 10px; color: var(--ink); vertical-align: top; }
+  tr.hidden-row, tr.page-hidden { display: none; }
+  .row-detail { display: none; background: rgba(23,78,166,0.05); }
+  tr.expanded + .row-detail { display: table-row; }
+  .pill { border-radius: 999px; padding: 4px 8px; font-weight: 900; font-size: 11px; display: inline-block; background: rgba(23,78,166,0.10); color: var(--brand); }
+  .pill.high { background: rgba(180,35,24,0.12); color: var(--danger); }
+  .pager { display: flex; justify-content: flex-end; gap: 8px; align-items: center; margin-top: 10px; }
+  .alert-drawer, .drilldown {
+    display: none; position: fixed; inset: 0; z-index: 60; background: rgba(15,23,42,0.45); padding: 6vh 18px;
+  }
+  .alert-drawer.open, .drilldown.open { display: block; }
+  .drawer-card, .drill-card {
+    max-width: 720px; margin: 0 auto; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 14px;
+  }
+  @media (max-width: 1180px) {
+    .hero, .grid-2 { grid-template-columns: 1fr; }
+    .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .filter-dock { top: 98px; grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 720px) {
+    .content { padding: 12px; }
+    .kpi-grid, .grid-3, .chart-grid, .filter-dock { grid-template-columns: 1fr; }
+    h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <img src="/static/cbc_logo.png" alt="CBC Logo"
+               style="height:38px;width:38px;border-radius:7px;object-fit:contain;flex-shrink:0;">
+          <div>
+            <div style="font-size:10px;font-weight:700;letter-spacing:2px;opacity:0.55;text-transform:uppercase;">CBC · IGEZ Analytics</div>
+            <div style="font-size:12px;font-weight:600;color:var(--muted);">Refreshed at {{ now }}</div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="icon-btn" id="themeToggle" title="Toggle dark/light mode">☀️ Day</button>
+        </div>
+      </div>
+      <nav class="tabs" id="topTabs">
+        <a class="{% if active_tab == 'overview' %}active{% endif %}" href="/page/overview{% if nav_query %}?{{ nav_query }}{% endif %}">Overview</a><a class="{% if active_tab == 'pending-approvals' %}active{% endif %}" href="/page/pending-approvals{% if nav_query %}?{{ nav_query }}{% endif %}">Pending Approvals</a><a class="{% if active_tab == 'rtps-analytics' %}active{% endif %}" href="/page/rtps-analytics{% if nav_query %}?{{ nav_query }}{% endif %}">RTPS Analytics</a><a class="{% if active_tab == 'cash-advance' %}active{% endif %}" href="/page/cash-advance{% if nav_query %}?{{ nav_query }}{% endif %}">Cash Advance</a><a class="{% if active_tab == 'subsidiaries' %}active{% endif %}" href="/page/subsidiaries{% if nav_query %}?{{ nav_query }}{% endif %}">Subsidiaries</a><a class="{% if active_tab == 'audit-risk' %}active{% endif %}" href="/page/audit-risk{% if nav_query %}?{{ nav_query }}{% endif %}">Audit &amp; Risk</a><a class="{% if active_tab == 'vendor-insights' %}active{% endif %}" href="/page/vendor-insights{% if nav_query %}?{{ nav_query }}{% endif %}">Vendor Insights</a><a class="{% if active_tab == 'reports' %}active{% endif %}" href="/page/reports{% if nav_query %}?{{ nav_query }}{% endif %}">Reports</a>
+      </nav>
+    </header>
+
+    <div class="content">
+      <form class="filter-dock" method="get" id="filterForm" action="/page/{{ active_tab }}">
+        <label>Period
+          <select name="period" id="periodFilter" {% if filters.date_selection_active %}disabled{% endif %}>
+            {% if filters.date_selection_active %}<option value="date_active" selected>Date range active</option>{% endif %}
+            <option value="today" {% if filters.period == "today" and not filters.date_selection_active %}selected{% endif %}>Today</option>
+            <option value="week" {% if filters.period == "week" and not filters.date_selection_active %}selected{% endif %}>This week</option>
+            <option value="month" {% if filters.period == "month" and not filters.date_selection_active %}selected{% endif %}>This month</option>
+            <option value="quarter" {% if filters.period == "quarter" and not filters.date_selection_active %}selected{% endif %}>This quarter</option>
+            <option value="year" {% if filters.period == "year" and not filters.date_selection_active %}selected{% endif %}>This year</option>
+            <option value="all" {% if filters.period == "all" and not filters.date_selection_active %}selected{% endif %}>All time</option>
+            <option value="cancel_period">Cancel</option>
+          </select>
+        </label>
+        <label>Subsidiary
+          <select name="subsidiary">
+            <option value="All">All subsidiaries</option>
+            {% for sub in sub_options %}<option value="{{ sub }}" {% if filters.subsidiary == sub %}selected{% endif %}>{{ sub }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>From
+          <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="start" id="startDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.start }}{% endif %}" data-date-value="{{ filters.start }}" {% if filters.period_filter_active %}disabled{% endif %}>
+        </label>
+        <label>To
+          <input type="{% if filters.period_filter_active %}text{% else %}date{% endif %}" name="end" id="endDateFilter" value="{% if filters.period_filter_active %}Period active{% else %}{{ filters.end }}{% endif %}" data-date-value="{{ filters.end }}" {% if filters.period_filter_active %}disabled{% endif %}>
+        </label>
+        <button class="btn primary" type="submit" id="applyFilters" {% if filters.date_range_incomplete or filters.date_range_invalid %}disabled{% endif %}>Apply</button>
+        <div class="filter-hint" id="filterHint">{% if filters.date_range_invalid %}From date cannot be later than To date.{% elif filters.date_range_incomplete %}Select both From and To dates before applying.{% endif %}</div>
+      </form>
+
+      {% if active_tab == "overview" %}
+      <section id="overview" class="section">
+        {% if d.system_ready %}
+        <!-- Empty state: full-width orb animation -->
+        <div class="exec-insight-card exec-insight-empty">
+          <div class="ei-filter-strip">
+            <span class="ei-filter-chip">&#x1F4C5; {{ filters.period | capitalize if filters.period != 'all' else 'All time' }}</span>
+            <span class="ei-filter-chip">&#x1F3E2; {{ filters.subsidiary }}</span>
+            {% if filters.start %}<span class="ei-filter-chip">{{ filters.start }} → {{ filters.end }}</span>{% endif %}
+          </div>
+          <div class="ei-label">Executive Insights</div>
+          <div class="ready-orb" aria-hidden="true"></div>
+          <div class="ready-title">Current Status: Optimal.</div>
+          <p class="ready-copy">Your dashboard is up to date with no pending actions. Real-time spending and approval insights will populate here as requests arrive.</p>
+        </div>
+        {% else %}
+        <!-- Active state: full-width rich executive insights -->
+        <div class="exec-insight-card exec-insight-active">
+          <div class="ei-filter-strip">
+            <span class="ei-filter-chip">&#x1F4C5; {{ filters.period | capitalize if filters.period != 'all' else 'All time' }}</span>
+            <span class="ei-filter-chip">&#x1F3E2; {{ filters.subsidiary }}</span>
+            {% if filters.start %}<span class="ei-filter-chip">{{ filters.start }} → {{ filters.end }}</span>{% endif %}
+          </div>
+          <div class="ei-header">
+            <div>
+              <div class="ei-label">Executive Insights</div>
+              <div class="ei-health-badge ei-health-{{ d.health.status | lower | replace(' ', '-') }}">
+                {{ d.health.status }} &nbsp;·&nbsp; {{ d.health.score }}/100
+              </div>
+            </div>
+            <a class="ei-pdf-btn" href="/executive-report{% if report_query %}?{{ report_query }}{% endif %}">&#x1F4C4; Executive PDF</a>
+          </div>
+          <div class="ei-meter-wrap">
+            <div class="ei-meter"><div class="ei-meter-fill" style="width:{{ d.health.score }}%"></div></div>
+            <span class="ei-meter-note">{{ d.health.tone }} Pending exposure {{ d.health.pending_ratio }}% of total spend.</span>
+          </div>
+          <div class="ei-body">
+            <div class="ei-insights-col">
+              <div class="ei-col-title">Key Signals</div>
+              <ul class="ei-insights-list">
+                {% for insight in d.insights %}
+                <li>{{ insight }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            <div class="ei-stats-col">
+              <div class="ei-col-title">Spend Snapshot</div>
+              <div class="ei-stat-grid">
+                <div class="ei-stat">
+                  <span>Approved Spend</span>
+                  <strong>&#x20A6;{{ "{:,.0f}".format(d.approved_spend) }}</strong>
+                </div>
+                <div class="ei-stat">
+                  <span>Waiting Approval</span>
+                  <strong>&#x20A6;{{ "{:,.0f}".format(d.pending_spend) }}</strong>
+                </div>
+                <div class="ei-stat">
+                  <span>This Month</span>
+                  <strong>&#x20A6;{{ "{:,.0f}".format(d.month_compare.spend) }}</strong>
+                </div>
+                <div class="ei-stat">
+                  <span>Total Requests</span>
+                  <strong>{{ d.total_approved_requests }}/{{ d.total_requests }}</strong>
+                </div>
+              </div>
+            </div>
+            <div class="ei-bottleneck-col">
+              <div class="ei-col-title">Approval Bottlenecks</div>
+              <div class="ei-bottleneck-list">
+                {% for item in d.bottlenecks %}
+                <div class="ei-bottleneck-row">
+                  <div class="ei-bottleneck-info">
+                    <span class="ei-bottleneck-label">{{ item.label }}</span>
+                    <span class="ei-bottleneck-impact">{{ item.impact }}</span>
+                  </div>
+                  <span class="ei-bottleneck-count">{{ item.count }}</span>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {% if active_tab == "overview" %}
+      <section class="section">
+        <div class="kpi-grid">
+          {% for kpi in d.executive_kpis %}
+          <article class="kpi status-{{ kpi.status }}" role="button" tabindex="0">
+            <div class="label">{{ kpi.label }}</div>
+            <div class="value">{{ kpi.value }}</div>
+            <span class="trend">{{ kpi.change }}</span>
+            <p class="subtle">{{ kpi.note }}</p>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "pending-approvals" %}
+      <section class="section grid-2">
+        <div class="panel">
+          <div class="section-head"><h2>Urgent Approvals</h2><span class="subtle">One-click executive action queue</span></div>
+          <div class="list">
+            {% if d.action_required %}
+              {% for item in d.action_required %}
+              <div class="item">
+                <strong>{{ item.title }} <span class="pill {% if item.priority_score >= 55 %}high{% endif %}">Score {{ item.priority_score }}</span></strong>
+                <span>{{ item.module }} - {{ item.subsidiary }} - {{ item.why }}</span>
+              </div>
+              {% endfor %}
+            {% else %}
+              <div class="item"><strong>No urgent approvals</strong><span>No urgent pending actions matched the current filters.</span></div>
+            {% endif %}
+          </div>
+        </div>
+        <div class="panel">
+          <div class="section-head"><h2>Executive Alerts</h2><button class="chip" id="openAlertsInline">Open alert center</button></div>
+          <div class="list">
+            {% for alert in d.alert_center[:5] %}
+            <div class="item"><strong>{{ alert.type }} <span class="pill {% if alert.priority == 'High' %}high{% endif %}">{{ alert.priority }}</span></strong><span>{{ alert.message }}</span></div>
+            {% else %}
+            <div class="item"><strong>Stable</strong><span>No high-priority alerts in this view.</span></div>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "audit-risk" %}
+      <section class="section grid-3">
+        <div class="panel"><h2>Risk Monitoring</h2><div class="list" style="margin-top:10px">{% for alert in d.risk_alerts %}<div class="item"><strong>Risk Alert</strong><span>{{ alert }}</span></div>{% else %}<div class="item"><strong>Stable</strong><span>No major spend risk alerts in this view.</span></div>{% endfor %}</div></div>
+        <div class="panel"><h2>Data Quality</h2><div class="list" style="margin-top:10px">{% for warning in d.data_quality_warnings %}<div class="item"><strong>Review</strong><span>{{ warning }}</span></div>{% else %}<div class="item"><strong>Clean</strong><span>No major data-quality warnings in this view.</span></div>{% endfor %}</div></div>
+        <div class="panel"><h2>Role View</h2><div id="roleNarrative" class="list" style="margin-top:10px"></div></div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "subsidiaries" %}
+      <section class="section panel">
+        <div class="section-head"><h2>Subsidiary Performance</h2><span class="subtle">Spend, pending value, and aging by entity</span></div>
+        <div class="grid-3">
+          {% for item in d.subsidiary_scorecards[:6] %}
+          <div class="item"><strong>{{ item.subsidiary }}</strong><span>{{ item.spend_label }} spend - {{ item.pending_label }} waiting - oldest {{ item.oldest_days }} days.</span></div>
+          {% else %}
+          <div class="item"><strong>No active subsidiaries</strong><span>No subsidiary has spend or pending activity in this view.</span></div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "rtps-analytics" %}
+      <section class="section panel">
+        <div class="section-head"><h2>RTPS Analytics</h2><span class="subtle">{{ d.rtps_total }} supplier payment requests - {{ d.rtps_pending }} pending</span></div>
+        <div class="chart-grid"><div class="chart-box">{{ charts.rtps_by_sub | safe }}</div><div class="chart-box">{{ charts.rtps_by_mode | safe }}</div><div class="chart-box">{{ charts.rtps_suppliers | safe }}</div><div class="chart-box">{{ charts.rtps_trend | safe }}</div></div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "cash-advance" %}
+      <section class="section panel">
+        <div class="section-head"><h2>Cash Advance Analytics</h2><span class="subtle">{{ d.ca_total }} requests - {{ d.ca_pending }} pending</span></div>
+        <div class="chart-grid"><div class="chart-box">{{ charts.ca_by_sub | safe }}</div><div class="chart-box">{{ charts.ca_status | safe }}</div><div class="chart-box">{{ charts.ca_trend | safe }}</div></div>
+        <div class="chart-grid" style="margin-top:12px"><div class="chart-box">{{ charts.ec_by_sub | safe }}</div><div class="chart-box">{{ charts.ec_status | safe }}</div></div>
+        <div class="chart-grid" style="margin-top:12px"><div class="chart-box" style="grid-column:1/-1">{{ charts.ec_trend | safe }}</div></div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "vendor-insights" %}
+      <section class="section panel">
+        <div class="section-head"><h2>Vendor Performance</h2><span class="subtle">Supplier concentration and duplicate-payment checks</span></div>
+        <div class="grid-2" style="margin-top:12px">
+          <div class="chart-box">{{ charts.rtps_suppliers | safe }}</div>
+          <div class="panel">
+            <h2>Duplicate or Suspicious Requests</h2>
+            <div class="list" style="margin-top:10px">{% for item in d.suspicious_requests %}<div class="item"><strong>{{ item.owner }} - {{ item.amount_label }}</strong><span>{{ item.module }} - {{ item.reason }}</span></div>{% else %}<div class="item"><strong>Clean</strong><span>No same-owner, same-amount repeat requests detected.</span></div>{% endfor %}</div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
+      {% if active_tab == "reports" %}
+      <section class="section panel">
+        <div class="section-head"><h2>Operational Details</h2><span class="subtle">Interactive table with sorting, filtering, pagination, export, and expandable rows</span></div>
+        <div class="table-tools">
+          <input class="smart-search" id="tableSearch" style="max-width:420px;padding-left:12px" placeholder="Inline table search">
+          <div class="top-actions">
+            <select id="statusFilter"><option value="">All statuses</option><option>Pending</option><option>Approved</option><option>Rejected</option><option>Unclassified</option></select>
+            <select id="priorityFilter"><option value="">All priority</option><option>High</option><option>Normal</option></select>
+            <button class="btn" id="exportCsv" type="button">Export CSV</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="opsTable">
+            <thead><tr><th data-sort="date">Date</th><th data-sort="request">Request ID</th><th data-sort="staff">Staff</th><th data-sort="vendor">Vendor</th><th data-sort="amount">Amount</th><th data-sort="status">Status</th><th data-sort="aging">Aging</th><th data-sort="level">Approval Level</th><th>Action Buttons</th></tr></thead>
+            <tbody>
+            {% for row in d.operational_rows %}
+              <tr class="data-row" data-search="{{ row.date }} {{ row.request_id }} {{ row.staff }} {{ row.vendor }} {{ row.amount }} {{ row.status }} {{ row.aging }} {{ row.approval_level }} {{ row.module }} {{ row.subsidiary }} {{ row.priority }}" data-status="{{ row.status }}" data-priority="{{ row.priority }}" data-amount="{{ row.amount_value }}" data-aging="{{ row.aging_days }}">
+                <td>{{ row.date }}</td><td>{{ row.request_id }}</td><td>{{ row.staff }}</td><td>{{ row.vendor }}</td><td>{{ row.amount }}</td><td><span class="pill">{{ row.status }}</span></td><td>{{ row.aging }}</td><td>{{ row.approval_level }}</td><td><button class="chip expand-row" type="button">Open</button></td>
+              </tr>
+              <tr class="row-detail"><td colspan="9"><strong>{{ row.module }} - {{ row.subsidiary }}</strong><br><span class="subtle">{{ row.details or "No additional request narrative captured." }}</span></td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="pager"><button class="btn" id="prevPage" type="button">Prev</button><span class="subtle" id="pageInfo"></span><button class="btn" id="nextPage" type="button">Next</button></div>
+      </section>
+      {% endif %}
+
+    </div>
+  </main>
+</div>
+
+<div class="alert-drawer" id="alertDrawer"><div class="drawer-card"><div class="section-head"><h2>Notification &amp; Alert Center</h2><button class="chip" data-close="alertDrawer">Close</button></div><div class="list">{% for alert in d.alert_center %}<div class="item"><strong>{{ alert.type }} <span class="pill {% if alert.priority == 'High' %}high{% endif %}">{{ alert.priority }}</span></strong><span>{{ alert.message }}</span><button class="chip dismiss-alert" type="button" style="margin-top:8px">Dismiss</button></div>{% else %}<div class="item"><strong>No active alerts</strong><span>Nothing requires executive attention in this view.</span></div>{% endfor %}</div></div></div>
+<div class="drilldown" id="drilldown"><div class="drill-card"><div class="section-head"><h2 id="drillTitle">Drill-down Analytics</h2><button class="chip" data-close="drilldown">Close</button></div><div id="drillBody" class="grid-3"></div></div></div>
+
+<script>
+  const searchTerms = {{ d.smart_search_terms | tojson }};
+  const commands = [
+    {label:"Search approvals", action:() => window.location.href="/page/pending-approvals{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"Open reports", action:() => window.location.href="/page/reports{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"Export analytics", action:() => window.location.href="/executive-report{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"View vendor data", action:() => window.location.href="/page/vendor-insights{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"Open subsidiary analytics", action:() => window.location.href="/page/subsidiaries{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"View high-risk transactions", action:() => window.location.href="/page/reports{% if report_query %}?{{ report_query }}{% endif %}"},
+    {label:"Open audit trail", action:() => window.location.href="/page/audit-risk{% if report_query %}?{{ report_query }}{% endif %}"}
+  ];
+  const roleCopy = {
+    ceo: [["Financial exposure", "{{ d.pending_spend|round|int }} pending value needs executive visibility."], ["High-value approvals", "{{ d.action_required|length }} urgent items are prioritized by age, amount, and approval level."], ["Risk alerts", "{{ d.alert_center|length }} executive alerts are active."]],
+    finance: [["Spend analysis", "{{ d.total_spend|round|int }} total tracked spend in this view."], ["Budget performance", "{{ d.month_compare.spend_change }} movement versus the previous month."], ["Vendor concentration", "Top supplier and subsidiary charts are available under RTPS Analytics."]],
+    operations: [["Daily workflow", "{{ d.what_changed.new_requests }} new requests in the recent window."], ["Queue health", "{{ d.pending_aging_total }} requests are currently pending."], ["Processing", "Use quick filters for overdue and CEO attention queues."]],
+    admin: [["Audit logs", "{{ d.activity_total }} activity events match this view."], ["User activity", "Staff request behavior and rejection analytics remain available below."], ["System management", "Filters, exports, and PDF reports are available from the sticky header."]]
+  };
+
+  function renderRole(role) {
+    const el = document.getElementById("roleNarrative");
+    if (el) el.innerHTML = roleCopy[role].map(x => `<div class="item"><strong>${x[0]}</strong><span>${x[1]}</span></div>`).join("");
+  }
+  renderRole("ceo");
+
+  document.getElementById("themeToggle").addEventListener("click", () => {
+    const isDark = document.body.classList.toggle("dark");
+    document.getElementById("themeToggle").textContent = isDark ? "🌙 Night" : "☀️ Day";
+    localStorage.setItem("igezTheme", isDark ? "dark" : "light");
+  });
+  // Restore saved theme on load
+  if (localStorage.getItem("igezTheme") === "dark") {
+    document.body.classList.add("dark");
+    const btn = document.getElementById("themeToggle");
+    if (btn) btn.textContent = "🌙 Night";
+  }
+  document.querySelectorAll("[data-close]").forEach(btn => btn.addEventListener("click", () => document.getElementById(btn.dataset.close).classList.remove("open")));
+  document.querySelectorAll(".dismiss-alert").forEach(btn => btn.addEventListener("click", () => btn.closest(".item").remove()));
+
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") document.querySelectorAll(".open").forEach(x => x.classList.remove("open"));
+  });
+
+  const tableSearch = document.getElementById("tableSearch");
+  const statusFilter = document.getElementById("statusFilter");
+  const priorityFilter = document.getElementById("priorityFilter");
+  const dataRows = [...document.querySelectorAll("#opsTable .data-row")];
+  let page = 1, pageSize = 20;
+  function setTableFilter(value) { if (priorityFilter) { priorityFilter.value = value; filterRows(); } }
+  function filterRows() {
+    if (!tableSearch) return;
+    const q = tableSearch.value.toLowerCase().trim();
+    const status = statusFilter ? statusFilter.value : "";
+    const priority = priorityFilter ? priorityFilter.value : "";
+    dataRows.forEach(row => {
+      const match = (!q || row.dataset.search.toLowerCase().includes(q)) && (!status || row.dataset.status === status) && (!priority || row.dataset.priority === priority);
+      row.classList.toggle("hidden-row", !match);
+      row.nextElementSibling.classList.toggle("hidden-row", !match);
+    });
+    page = 1; paginate();
+  }
+  if (tableSearch) [tableSearch, statusFilter, priorityFilter].forEach(el => el && el.addEventListener("input", filterRows));
+  function paginate() {
+    if (!dataRows.length) return;
+    const visible = dataRows.filter(r => !r.classList.contains("hidden-row"));
+    const pages = Math.max(1, Math.ceil(visible.length / pageSize));
+    page = Math.min(page, pages);
+    dataRows.forEach(row => {
+      row.classList.add("page-hidden");
+      row.nextElementSibling.classList.add("page-hidden");
+    });
+    visible.slice((page - 1) * pageSize, page * pageSize).forEach(row => {
+      row.classList.remove("page-hidden");
+      row.nextElementSibling.classList.remove("page-hidden");
+    });
+    const pi = document.getElementById("pageInfo");
+    if (pi) pi.textContent = `Page ${page} of ${pages} - ${visible.length} rows`;
+  }
+  const prevPage = document.getElementById("prevPage");
+  const nextPage = document.getElementById("nextPage");
+  if (prevPage) prevPage.addEventListener("click", () => { page = Math.max(1, page - 1); paginate(); });
+  if (nextPage) nextPage.addEventListener("click", () => { page += 1; paginate(); });
+  document.querySelectorAll(".expand-row").forEach(btn => btn.addEventListener("click", () => btn.closest("tr").classList.toggle("expanded")));
+  document.querySelectorAll("#opsTable th[data-sort]").forEach((th, index) => th.addEventListener("click", () => {
+    const tbody = document.querySelector("#opsTable tbody");
+    const pairs = dataRows.map(row => [row, row.nextElementSibling]);
+    pairs.sort((a,b) => a[0].children[index].textContent.localeCompare(b[0].children[index].textContent, undefined, {numeric:true}));
+    pairs.forEach(pair => { tbody.appendChild(pair[0]); tbody.appendChild(pair[1]); });
+    paginate();
+  }));
+  const exportCsv = document.getElementById("exportCsv");
+  if (exportCsv) exportCsv.addEventListener("click", () => {
+    const rows = dataRows.filter(r => !r.classList.contains("hidden-row")).map(r => [...r.children].slice(0, 8).map(td => `"${td.textContent.replaceAll('"','""').trim()}"`).join(","));
+    const csv = ["Date,Request ID,Staff,Vendor,Amount,Status,Aging,Approval Level", ...rows].join("\\n");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+    link.download = "igez-executive-dashboard.csv"; link.click();
+  });
+
+  document.querySelectorAll("#quickFilters .chip").forEach(btn => btn.addEventListener("click", () => {
+    const value = btn.dataset.filter;
+    if (value === "today" || value === "week") { document.getElementById("periodFilter").value = value; document.getElementById("filterForm").submit(); return; }
+    window.location.href = "/page/reports?filter=" + encodeURIComponent(value);
+  }));
+
+  const periodFilter = document.getElementById("periodFilter");
+  const applyFilters = document.getElementById("applyFilters");
+  const filterHint = document.getElementById("filterHint");
+  const periodDisabledValue = "date_active";
+  const cancelPeriodValue = "cancel_period";
+  let previousPeriodValue = periodFilter.value === periodDisabledValue ? "all" : periodFilter.value;
+  const dateFilters = [
+    document.getElementById("startDateFilter"),
+    document.getElementById("endDateFilter")
+  ];
+
+  function getDisabledPeriodOption() {
+    let option = periodFilter.querySelector(`option[value="${periodDisabledValue}"]`);
+    if (!option) {
+      option = new Option("Date range active", periodDisabledValue);
+      periodFilter.insertBefore(option, periodFilter.firstChild);
+    }
+    return option;
+  }
+
+  function syncPeriodFilter() {
+    if (periodFilter.value === cancelPeriodValue) {
+      previousPeriodValue = "all";
+      periodFilter.value = "all";
+    }
+
+    const dateSelectionActive = dateFilters.some((input) => input.dataset.dateValue);
+    const dateRangeIncomplete = dateFilters.filter((input) => input.dataset.dateValue).length === 1;
+    const dateRangeInvalid = dateFilters.every((input) => input.dataset.dateValue)
+      && dateFilters[0].dataset.dateValue > dateFilters[1].dataset.dateValue;
+    const periodFilterActive = periodFilter.value !== "all" && periodFilter.value !== periodDisabledValue;
+
+    if (dateSelectionActive && periodFilter.value !== periodDisabledValue) {
+      previousPeriodValue = periodFilter.value;
+    }
+
+    periodFilter.disabled = dateSelectionActive;
+    if (dateSelectionActive) {
+      getDisabledPeriodOption().selected = true;
+    } else {
+      const disabledOption = periodFilter.querySelector(`option[value="${periodDisabledValue}"]`);
+      if (disabledOption) disabledOption.remove();
+      periodFilter.value = previousPeriodValue;
+    }
+
+    dateFilters.forEach((input) => {
+      input.disabled = periodFilterActive;
+      if (periodFilterActive) {
+        input.type = "text";
+        input.value = "Period active";
+      } else {
+        input.type = "date";
+        input.value = input.dataset.dateValue;
+      }
+    });
+
+    if (dateRangeInvalid) {
+      filterHint.textContent = "From date cannot be later than To date.";
+    } else if (dateRangeIncomplete) {
+      filterHint.textContent = "Select both From and To dates before applying.";
+    } else {
+      filterHint.textContent = "";
+    }
+    applyFilters.disabled = dateRangeIncomplete || dateRangeInvalid;
+  }
+  dateFilters.forEach((input) => input.addEventListener("input", () => {
+    input.dataset.dateValue = input.value;
+    syncPeriodFilter();
+  }));
+  periodFilter.addEventListener("change", () => {
+    if (periodFilter.value !== "all" && periodFilter.value !== periodDisabledValue && periodFilter.value !== cancelPeriodValue) {
+      previousPeriodValue = periodFilter.value;
+      dateFilters.forEach((input) => {
+        input.dataset.dateValue = "";
+        input.value = "";
+      });
+    } else if (periodFilter.value === "all") {
+      previousPeriodValue = "all";
+    }
+    syncPeriodFilter();
+  });
+  syncPeriodFilter();
+  if (dataRows && dataRows.length) paginate();
+</script>
+</body>
+</html>
+"""
+
 
 ERROR_TEMPLATE = """
 <!DOCTYPE html>
@@ -1915,7 +2840,38 @@ ERROR_TEMPLATE = """
 </html>
 """
 
-# -- Route ---------------------------------------------------------------------
+# -- Cache & Route helpers -----------------------------------------------------
+
+import time as _time
+_DATA_CACHE: dict = {}          # key → (timestamp, payload)
+_CACHE_TTL = 90                 # seconds before cache expires
+
+def _cache_key(filters: dict) -> str:
+    return "|".join([
+        filters.get("period", "all"),
+        filters.get("subsidiary", "All"),
+        str(filters.get("start", "")),
+        str(filters.get("end", "")),
+    ])
+
+def _build_nav_query(filters: dict) -> str:
+    """Build a query string that carries filter state across nav links."""
+    from urllib.parse import urlencode
+    params: dict = {}
+    period = filters.get("period", "all")
+    subsidiary = filters.get("subsidiary", "All")
+    start = filters.get("start", "")
+    end   = filters.get("end", "")
+    if period and period not in ("all", "date_active"):
+        params["period"] = period
+    if subsidiary and subsidiary != "All":
+        params["subsidiary"] = subsidiary
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    return urlencode(params) if params else ""
+
 
 def dashboard_payload():
     now = app_now().strftime("%d %b %Y, %H:%M")
@@ -1949,7 +2905,20 @@ def dashboard_payload():
         "period_filter_active": period_filter_active,
     }
     sub_options = sorted(set(sub_map.values()))
-    d = load_all(db, sub_map, filters)
+
+    # --- Cache: skip re-running load_all if same filters were used recently ---
+    ck = _cache_key(filters)
+    cached = _DATA_CACHE.get(ck)
+    if cached and (_time.monotonic() - cached[0]) < _CACHE_TTL:
+        d = cached[1]
+    else:
+        d = load_all(db, sub_map, filters)
+        _DATA_CACHE[ck] = (_time.monotonic(), d)
+        # Prune old entries to avoid unbounded growth
+        if len(_DATA_CACHE) > 30:
+            oldest = min(_DATA_CACHE, key=lambda k: _DATA_CACHE[k][0])
+            _DATA_CACHE.pop(oldest, None)
+
     return now, filters, sub_options, d
 
 
@@ -2061,6 +3030,67 @@ def build_executive_pdf(d, filters, now):
 
 @app.route("/")
 def dashboard():
+    return redirect("/page/overview")
+
+
+@app.route("/api/search")
+def api_search():
+    from flask import jsonify
+    q = request.args.get("q", "").strip().lower()
+    if len(q) < 2:
+        return jsonify(results=[])
+    try:
+        db = get_db()
+        sub_map = get_subsidiary_map(db)
+        results = []
+
+        def _add(module, record, staff_field, vendor_field, amount_fn):
+            staff = normalize_cbc_text(str(record.get(staff_field) or record.get("name") or record.get("staff_name") or "")).strip()
+            vendor = normalize_cbc_text(str(record.get(vendor_field) or "")).strip()
+            rid = str(record.get("_id", ""))[-8:]
+            sub = resolve_sub(record.get("subsidiary_id", ""), sub_map)
+            combined = " ".join([staff, vendor, rid, sub, module]).lower()
+            if q not in combined:
+                return
+            dt = record_date(record)
+            amt = amount_fn(record)
+            results.append({
+                "module": module,
+                "staff": staff or "—",
+                "vendor": vendor or "—",
+                "subsidiary": sub,
+                "amount": format_money(amt) if amt else "—",
+                "status": str(record.get("status") or "").title() or "Unknown",
+                "date": dt.strftime("%d %b %Y") if dt else "—",
+                "request_id": rid,
+            })
+
+        def ec_amt(r):
+            items = r.get("expense_claim", [])
+            if isinstance(items, list):
+                return sum(safe_amount(i.get("value", 0)) for i in items if isinstance(i, dict))
+            return 0.0
+
+        for r in db["Leave_Request"].find({}):
+            _add("Leave", r, "name", "leave_Details", lambda _: 0)
+        for r in db["CashAdvance"].find({}):
+            _add("Cash Advance", r, "name", "name", lambda rec: safe_amount(rec.get("amount", 0)))
+        for r in db["ExpenseClaim"].find({}):
+            _add("Expense Claim", r, "staff_name", "staff_name", ec_amt)
+        for r in db["RequestToPaySupplier"].find({}):
+            _add("RTPS", r, "staff_name", "name_of_supplier", lambda rec: safe_amount(rec.get("amount", 0)))
+
+        results.sort(key=lambda x: (x["status"] == "Pending"), reverse=True)
+        return jsonify(results=results[:12])
+    except Exception as exc:
+        return jsonify(results=[], error=str(exc)), 500
+
+
+@app.route("/page/<tab>")
+def dashboard_page(tab):
+    valid_tabs = {"overview", "pending-approvals", "rtps-analytics", "cash-advance", "subsidiaries", "audit-risk", "vendor-insights", "reports"}
+    if tab not in valid_tabs:
+        tab = "overview"
     now = app_now().strftime("%d %b %Y, %H:%M")
     try:
         now, filters, sub_options, d = dashboard_payload()
@@ -2077,65 +3107,29 @@ def dashboard():
     BLUE_DEEP = "#0b3a75"
 
     charts = {}
-
-    # Leave
-    charts["leave_by_sub"]  = bar(list(d["leave_by_sub"].keys()),
-                                   list(d["leave_by_sub"].values()),
-                                   "Leave Requests by Subsidiary", BLUE)
-    charts["leave_by_type"] = pie(list(d["leave_by_type"].keys()),
-                                   list(d["leave_by_type"].values()),
-                                   "Leave Type Breakdown")
-    charts["leave_status"]  = pie(["Approved","Pending"],
-                                   [d["leave_approved"], d["leave_pending"]],
-                                   "Leave Status")
-    charts["leave_trend"]   = line(list(d["leave_by_month"].keys()),
-                                    list(d["leave_by_month"].values()),
-                                    "Leave Requests - Monthly Trend", BLUE)
-
-    # Cash Advance
-    charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()),
-                                list(d["ca_by_sub"].values()),
-                                "Cash Advance Amount by Subsidiary (₦)", BLUE_LIGHT)
-    charts["ca_status"]  = pie(["Approved","Pending"],
-                                [d["ca_approved"], d["ca_pending"]],
-                                "Cash Advance Status")
-    charts["ca_trend"]   = line(list(d["ca_by_month"].keys()),
-                                 list(d["ca_by_month"].values()),
-                                 "Cash Advance - Monthly Trend (₦)", BLUE_LIGHT)
-
-    # Expense Claims
-    charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()),
-                                list(d["ec_by_sub"].values()),
-                                "Expense Claims Amount by Subsidiary (₦)", BLUE_SOFT)
-    charts["ec_status"]  = pie(["Approved","Pending"],
-                                [d["ec_approved"], d["ec_pending"]],
-                                "Expense Claim Status")
-    charts["ec_trend"]   = line(list(d["ec_by_month"].keys()),
-                                 list(d["ec_by_month"].values()),
-                                 "Expense Claims - Monthly Trend (₦)", BLUE_SOFT)
-
-    # RTPS
-    charts["rtps_by_sub"]   = bar(list(d["rtps_by_sub"].keys()),
-                                   list(d["rtps_by_sub"].values()),
-                                   "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
-    charts["rtps_by_mode"]  = pie(list(d["rtps_by_mode"].keys()),
-                                   list(d["rtps_by_mode"].values()),
-                                   "Payment Mode")
-    charts["rtps_suppliers"]= hbar(list(d["rtps_by_supplier"].values()),
-                                    list(d["rtps_by_supplier"].keys()),
-                                    "Top 10 Suppliers by Amount (₦)", BLUE_DEEP)
-    charts["rtps_trend"]    = line(list(d["rtps_by_month"].keys()),
-                                    list(d["rtps_by_month"].values()),
-                                    "RTPS - Monthly Trend (₦)", BLUE_DEEP)
+    if tab in {"rtps-analytics", "vendor-insights"}:
+        charts["rtps_by_sub"]    = bar(list(d["rtps_by_sub"].keys()), list(d["rtps_by_sub"].values()), "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
+        charts["rtps_by_mode"]   = pie(list(d["rtps_by_mode"].keys()), list(d["rtps_by_mode"].values()), "Payment Mode")
+        charts["rtps_suppliers"] = hbar(list(d["rtps_by_supplier"].values()), list(d["rtps_by_supplier"].keys()), "Top 10 Suppliers by Amount (₦)", BLUE_DEEP)
+        charts["rtps_trend"]     = line(list(d["rtps_by_month"].keys()), list(d["rtps_by_month"].values()), "RTPS - Monthly Trend (₦)", BLUE_DEEP)
+    if tab == "cash-advance":
+        charts["ca_by_sub"]  = bar(list(d["ca_by_sub"].keys()), list(d["ca_by_sub"].values()), "Cash Advance Amount by Subsidiary (₦)", BLUE_LIGHT)
+        charts["ca_status"]  = pie(["Approved","Pending"], [d["ca_approved"], d["ca_pending"]], "Cash Advance Status")
+        charts["ca_trend"]   = line(list(d["ca_by_month"].keys()), list(d["ca_by_month"].values()), "Cash Advance - Monthly Trend (₦)", BLUE_LIGHT)
+        charts["ec_by_sub"]  = bar(list(d["ec_by_sub"].keys()), list(d["ec_by_sub"].values()), "Expense Claims Amount by Subsidiary (₦)", BLUE_SOFT)
+        charts["ec_status"]  = pie(["Approved","Pending"], [d["ec_approved"], d["ec_pending"]], "Expense Claim Status")
+        charts["ec_trend"]   = line(list(d["ec_by_month"].keys()), list(d["ec_by_month"].values()), "Expense Claims - Monthly Trend (₦)", BLUE_SOFT)
 
     return render_template_string(
-        TEMPLATE,
+        EXEC_TEMPLATE,
         d=d,
         charts=charts,
         now=now,
         filters=filters,
         sub_options=sub_options,
         report_query=request.query_string.decode("utf-8"),
+        nav_query=_build_nav_query(filters),
+        active_tab=tab,
     )
 
 
@@ -2162,4 +3156,4 @@ def executive_report():
 if __name__ == "__main__":
     print("Starting dashboard...")
     print("Open in browser:  http://127.0.0.1:8050")
-    app.run(debug=True, port=8050)
+    app.run(debug=False, port=8050, use_reloader=False)
