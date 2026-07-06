@@ -14,6 +14,7 @@ Output structure:
 
 import json
 import io
+import re
 from pathlib import Path
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -25,6 +26,34 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from pypdf import PdfWriter, PdfReader
+
+# ── Subsidiary ID → name map ─────────────────────────────────────────────────
+
+def load_subsidiary_name_map() -> dict:
+    """Return {sub_id: clean_filename_stem} from subsidiary.json."""
+    id_to_name = {}
+    sub_file = Path("subsidiary.json")
+    if not sub_file.exists():
+        return id_to_name
+    with open(sub_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                sub = json.loads(line)
+                raw_id = sub.get("_id", {})
+                sub_id = raw_id.get("$oid") if isinstance(raw_id, dict) else str(raw_id)
+                name   = sub.get("subsidiary_name", "").strip()
+                if sub_id and name:
+                    # Make a safe filename: lowercase, spaces→underscore, strip specials
+                    safe = re.sub(r"[^\w\s-]", "", name).strip()
+                    safe = re.sub(r"\s+", "_", safe).lower()
+                    id_to_name[sub_id] = safe
+            except Exception:
+                pass
+    return id_to_name
+
 
 # ── Column definitions per report type ───────────────────────────────────────
 # (display_header, json_key)
@@ -242,6 +271,8 @@ def generate_pdf(records, columns, title, subsidiary, output_path):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
+    sub_name_map = load_subsidiary_name_map()
+
     for report_type, source_dir in SOURCE_DIRS.items():
         source_path = Path(source_dir)
         if not source_path.exists():
@@ -257,6 +288,9 @@ def run():
         print(f"\n{title}")
         print("-" * 40)
 
+        # Track which output stems we've already written to merge duplicates
+        merged: dict = {}  # output_stem -> list of records
+
         for json_file in sorted(source_path.glob("*.json")):
             records = []
             with open(json_file, encoding="utf-8") as f:
@@ -269,9 +303,29 @@ def run():
                 print(f"  Skipping {json_file.name} — empty")
                 continue
 
-            subsidiary = records[0].get("subsidiary_name", json_file.stem)
-            pdf_path   = out_dir / (json_file.stem + ".pdf")
+            # Resolve output filename
+            stem = json_file.stem
+            if stem.startswith("subsidiary_"):
+                sub_id = stem[len("subsidiary_"):]
+                resolved = sub_name_map.get(sub_id)
+                output_stem = resolved if resolved else stem
+            else:
+                output_stem = stem
+
+            merged.setdefault(output_stem, [])
+            merged[output_stem].extend(records)
+
+        # Write one PDF per resolved subsidiary name
+        for output_stem, records in sorted(merged.items()):
+            subsidiary = records[0].get("subsidiary_name", output_stem.replace("_", " ").title())
+            pdf_path   = out_dir / (output_stem + ".pdf")
+            print(f"  Writing {pdf_path.name} ({len(records)} records)")
             generate_pdf(records, columns, title, subsidiary, pdf_path)
+
+        # Remove stale ObjectId-named PDFs that are now replaced
+        for old_pdf in out_dir.glob("subsidiary_*.pdf"):
+            old_pdf.unlink()
+            print(f"  Removed stale: {old_pdf.name}")
 
     print("\nAll PDF reports generated in: pdf_reports/")
 
