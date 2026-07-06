@@ -254,9 +254,19 @@ def run_sync():
     log.info("Sync complete.")
     log.info("=" * 55)
 
-    # Auto-generate PDF reports after every sync
-    log.info("Generating PDF reports...")
+    # Step 1: Enrich all segmented files with latest attachment URLs from MongoDB
+    log.info("Enriching attachment links...")
     import subprocess
+    subprocess.run(["python", "enrich_attachments.py"], check=True)
+    log.info("Attachment links updated.")
+
+    # Step 2: Download any new/missing attachments and set attachments_local paths
+    log.info("Downloading new attachments...")
+    subprocess.run(["python", "download_attachments.py"], check=True)
+    log.info("Attachments downloaded.")
+
+    # Step 3: Rebuild PDF reports with all current attachments
+    log.info("Generating PDF reports...")
     subprocess.run(["python", "generate_pdf_reports.py"], check=True)
     log.info("PDF reports updated.")
 
