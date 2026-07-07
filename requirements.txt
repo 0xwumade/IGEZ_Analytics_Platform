@@ -1,6 +1,0 @@
-Flask
-pandas
-plotly
-pymongo
-python-dotenv
-reportlab

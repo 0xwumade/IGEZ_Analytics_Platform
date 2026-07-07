@@ -1,4 +1,4 @@
-$TOOL = "C:\CBC_001\mongodb-database-tools-windows-x86_64-100.15.0\bin"
+$TOOL = "C:\Igez\mongodb-database-tools-windows-x86_64-100.15.0\bin"
 $URI  = "mongodb+srv://Damilola:H868xEu5jrewT2Da@cluster0.zpxsdyo.mongodb.net/Paperless_app_prod"
 $DATE = Get-Date -Format "yyyy-MM-dd"
 $BKUP = "C:\backup\$DATE"
