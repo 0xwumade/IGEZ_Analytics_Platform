@@ -26,16 +26,12 @@ For each module, it:
 ```
 MongoDB Atlas
      │
-     │  sync.py (incremental pull)
-     ▼
-Raw JSONL files  →  segmented_<module>/subsidiary_<id>.json
-     │
-     │  enrich_attachments.py (links Cloudinary URLs to records)
-     │  download_attachments.py (downloads & converts files → local PDF)
-     ▼
-attachments_local/<record_id>/<file>.pdf
-     │
      │  generate_pdf_reports.py
+     │  (queries all collections directly)
+     ▼
+Downloads attachments → attachments_local/<record_id>/<file>.pdf
+     │
+     │  builds PDF per subsidiary
      ▼
 pdf_reports/
   ├── cash_advance/
@@ -47,6 +43,8 @@ pdf_reports/
   ├── leave_request/
   └── rtps/
 ```
+
+`sync.py` handles incremental record syncing to local JSONL files (used as a lightweight cache and audit trail), then calls `generate_pdf_reports.py` automatically.
 
 ---
 
@@ -76,33 +74,21 @@ APP_TIMEZONE=Africa/Lagos
 
 ## Running the Pipeline
 
-### Full sync (recommended — does everything in one command)
+### Full run (recommended)
 
 ```bash
-python sync.py
-```
-
-This will:
-- Pull all new records from MongoDB since the last run
-- Enrich records with attachment links
-- Download any new attachment files
-- Rebuild all PDF reports
-
-### Run individual steps
-
-```bash
-# Step 1: Sync new records from MongoDB
-python sync.py
-
-# Step 2: Refresh attachment links on all records
-python enrich_attachments.py
-
-# Step 3: Download missing attachments
-python download_attachments.py
-
-# Step 4: Rebuild PDF reports
 python generate_pdf_reports.py
 ```
+
+This connects to MongoDB directly, downloads any missing attachments, and rebuilds all PDF reports. No intermediate files needed.
+
+### Incremental sync + PDF rebuild
+
+```bash
+python sync.py
+```
+
+Syncs new records to local JSONL files (audit trail), then automatically runs `generate_pdf_reports.py`.
 
 ### MongoDB backup
 
