@@ -1,8 +1,8 @@
 ﻿"""
-dashboard.py
-------------
+analytics_platform.py
+---------------------
 Analytics dashboard for CBC Paperless App.
-Run:  python dashboard.py
+Run:  python analytics_platform.py
 Then open:  http://127.0.0.1:5000
 """
 
