@@ -1,0 +1,6 @@
+flask==2.3.0
+pymongo[srv]==4.16.0
+python-dotenv==1.0.1
+plotly==5.22.0
+pandas==2.3.3
+reportlab==4.0.4
