@@ -869,20 +869,24 @@ def load_all(db, sub_map, filters=None):
         avg_days = round(sum(ages) / len(ages), 1) if ages else 0
         return len(waiting), amount, avg_days
 
-    def bottleneck(label, records, field, amount_fn, previous_field=None):
+    def bottleneck(label, records, field, amount_fn, previous_field=None, is_leave=False):
         count, amount, avg_days = waiting_stage_details(records, field, amount_fn, previous_field)
+        if is_leave:
+            waiting_label = "Nill"
+        else:
+            waiting_label = format_money(amount) or "₦0"
         return {
             "label": label,
             "count": count,
             "amount": amount,
-            "amount_label": format_money(amount) or "₦0",
+            "amount_label": waiting_label,
             "avg_days": avg_days,
-            "impact": f"{count} requests, {format_money(amount) or '₦0'} waiting, {avg_days} avg days",
+            "impact": f"{count} requests, {waiting_label} waiting, {avg_days} avg days",
         }
 
     bottlenecks = [
-        bottleneck("HOD - Leave", leaves, "is_HOD_Approved", lambda r: 0),
-        bottleneck("HR - Leave", leaves, "is_HR_Approved", lambda r: 0, "is_HOD_Approved"),
+        bottleneck("HOD - Leave", leaves, "is_HOD_Approved", lambda r: 0, is_leave=True),
+        bottleneck("HR - Leave",  leaves, "is_HR_Approved",  lambda r: 0, "is_HOD_Approved", is_leave=True),
         bottleneck("HOD - Cash Adv", advances, "is_HOD_Approved", lambda r: safe_amount(r.get("amount", 0))),
         bottleneck("CFO - Cash Adv", advances, "is_CFO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_HOD_Approved"),
         bottleneck("CEO - Cash Adv", advances, "is_CEO_Approved", lambda r: safe_amount(r.get("amount", 0)), "is_CFO_Approved"),
