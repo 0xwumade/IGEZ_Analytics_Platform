@@ -1233,7 +1233,7 @@ def chart_layout(fig, title, height, margin, font_size=11, xlabel="", ylabel="")
 # Plotly modebar: explicitly show ONLY download (toImage) and zoom2d
 # Using modeBarButtons whitelist is the only reliable way
 _CHART_CONFIG = {
-    "modeBarButtons": [["toImage", "zoom2d"]],
+    "modeBarButtons": [["toImage"]],
     "displaylogo": False,
     "scrollZoom": False,
 }
