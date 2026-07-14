@@ -417,7 +417,7 @@ def load_all(db, sub_map, filters=None):
         activity_events,
         all_leaves,
         "Leave",
-        lambda r: f"{r.get('leave_Details', 'Leave')} leave",
+        lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"),
         lambda r: "",
         "#1155cc",
     )
@@ -495,7 +495,7 @@ def load_all(db, sub_map, filters=None):
     ]
 
     aging_modules = [
-        ("Leave", leaves, lambda r: f"{r.get('leave_Details', 'Leave')} leave", lambda r: 0, leave_stages),
+        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: 0, leave_stages),
         ("Cash Advance", advances, lambda r: r.get("name", "Cash advance"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
         ("Expense Claim", expenses, lambda r: r.get("staff_name", "Expense claim"), ec_total_amount, finance_stages),
         ("RTPS", rtps, lambda r: r.get("name_of_supplier", "Supplier payment"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
@@ -524,10 +524,13 @@ def load_all(db, sub_map, filters=None):
                 "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
                 "created": created.strftime("%d %b %Y") if created else "Unknown",
                 "days": days if days is not None else 0,
-                "amount": format_money(amount),
+                "amount": "Nill" if module == "Leave" else format_money(amount),
                 "amount_value": amount,
                 "waiting_on": next_stage(record, stages),
                 "description": short_text(record.get("justification", ""), 110),
+                "leave_type":         normalize_cbc_text(record.get("leave_Details", "")) if module == "Leave" else "",
+                "leave_days_applied": _int(record.get("no_days_applying_for", 0)) if module == "Leave" else 0,
+                "leave_days_left":    _int(record.get("no_days_left", 0)) if module == "Leave" else 0,
             })
 
     aging_rows = []
@@ -558,11 +561,15 @@ def load_all(db, sub_map, filters=None):
         age_score = min(item["days"], 30) / 30 * 40
         stage_score = 15 if item["waiting_on"] in {"CFO", "CEO", "COO", "Chairman"} else 8
         item["priority_score"] = round(amount_score + age_score + stage_score, 1)
-        item["why"] = (
-            f"{item['days']} days old"
-            + (f", {item['amount']} waiting" if item["amount"] else "")
-            + f", waiting on {item['waiting_on']}"
-        )
+        if item["module"] == "Leave":
+            day_info = f", {item['leave_days_applied']} day(s) applied" if item["leave_days_applied"] else ""
+            item["why"] = f"{item['days']} days old{day_info}, waiting on {item['waiting_on']}"
+        else:
+            item["why"] = (
+                f"{item['days']} days old"
+                + (f", {item['amount']} waiting" if item["amount"] else "")
+                + f", waiting on {item['waiting_on']}"
+            )
     data["action_required"] = sorted(
         pending_items,
         key=lambda item: (item["priority_score"], item["amount_value"], item["days"]),
@@ -641,7 +648,7 @@ def load_all(db, sub_map, filters=None):
 
     staff_stats = defaultdict(lambda: {"count": 0, "amount": 0.0, "pending": 0, "rejected": 0, "modules": defaultdict(int)})
     staff_sources = [
-        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: 0),
+        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: 0),
         ("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: safe_amount(r.get("amount", 0))),
         ("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), ec_total_amount),
     ]
@@ -1075,7 +1082,7 @@ def load_all(db, sub_map, filters=None):
                 days_applied = _int(record.get("no_days_applying_for", 0))
                 days_left    = _int(record.get("no_days_left", 0))
                 row_vendor  = applicant                           # use applicant name in "Vendor" column
-                row_amount  = "Nil"
+                row_amount  = "Nill"
                 row_amount_value = 0
             else:
                 leave_type   = ""
@@ -1109,7 +1116,7 @@ def load_all(db, sub_map, filters=None):
     add_table_rows("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: "Cash Advance", lambda r: safe_amount(r.get("amount", 0)), finance_stages)
     add_table_rows("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), lambda r: "Expense Claim", ec_total_amount, finance_stages)
     add_table_rows("RTPS", rtps, lambda r: requester(r, "staff_name", "name"), lambda r: normalize_cbc_text(r.get("name_of_supplier", "Supplier")), lambda r: safe_amount(r.get("amount", 0)), finance_stages)
-    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: None, lambda r: 0, leave_stages)
+    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: None, lambda r: 0, leave_stages)
     data["operational_rows"] = sorted(
         operational_rows,
         key=lambda row: (row["status"] == "Pending", row["aging_days"], row["amount_value"]),
@@ -1673,7 +1680,10 @@ TEMPLATE = """
             {% if item.description %}<div class="action-meta">{{ item.description }}</div>{% endif %}
           </div>
           <div class="action-side">
-            {% if item.amount %}<div>{{ item.amount }}</div>{% endif %}
+            {% if item.module == "Leave" %}
+              <div>Nill</div>
+              <div>{{ item.leave_type }}{% if item.leave_days_applied %} · {{ item.leave_days_applied }} day(s){% endif %}</div>
+            {% elif item.amount %}<div>{{ item.amount }}</div>{% endif %}
             <div>Score {{ item.priority_score }}</div>
           </div>
         </div>
@@ -1877,7 +1887,10 @@ TEMPLATE = """
           </div>
           <div class="oldest-side">
             <div>{{ item.subsidiary }}</div>
-            {% if item.amount %}<div>{{ item.amount }}</div>{% endif %}
+            {% if item.module == "Leave" %}
+              <div>Nill</div>
+              {% if item.leave_days_applied %}<div>{{ item.leave_days_applied }} day(s) applied</div>{% endif %}
+            {% elif item.amount %}<div>{{ item.amount }}</div>{% endif %}
             <div class="stage">Waiting: {{ item.waiting_on }}</div>
           </div>
         </div>
@@ -3156,7 +3169,7 @@ def api_search():
                     "staff": staff or "—",
                     "vendor": staff or "—",   # show applicant name in vendor column
                     "subsidiary": sub,
-                    "amount": "Nil",
+                    "amount": "Nill",
                     "status": str(r.get("status") or "").title() or "Unknown",
                     "date": dt.strftime("%d %b %Y") if dt else "—",
                     "request_id": rid,
