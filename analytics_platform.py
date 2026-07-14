@@ -264,18 +264,18 @@ def load_all(db, sub_map, filters=None):
         try: return int(val)
         except (TypeError, ValueError): return 0
 
-    data["leave_days_applied"]  = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves)
-    data["leave_days_approved"] = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves if r.get("status") == "Approved")
-    data["leave_days_pending"]  = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves if r.get("status") == "Pending")
+    data["leave_days_applied"]  = sum(_int(r.get("no_days_taken", 0)) for r in leaves)
+    data["leave_days_approved"] = sum(_int(r.get("no_days_taken", 0)) for r in leaves if r.get("status") == "Approved")
+    data["leave_days_pending"]  = sum(_int(r.get("no_days_taken", 0)) for r in leaves if r.get("status") == "Pending")
 
     leave_by_sub   = defaultdict(int)   # request count per subsidiary
     leave_by_type  = defaultdict(int)   # request count per leave type
     leave_by_month = defaultdict(int)   # request count per month
-    leave_days_by_type = defaultdict(int)  # days applied per leave type
+    leave_days_by_type = defaultdict(int)  # total days taken per leave type
     for r in leaves:
         sub  = resolve_sub(r.get("subsidiary_id", ""), sub_map)
         ltyp = r.get("leave_Details", "Unknown")
-        days = _int(r.get("no_days_applying_for", 0))
+        days = _int(r.get("no_days_taken", 0))
         leave_by_sub[sub]   += 1
         leave_by_type[ltyp] += 1
         leave_by_month[month_label(r.get("createdAt"))] += 1
@@ -577,7 +577,7 @@ def load_all(db, sub_map, filters=None):
                 "waiting_on": next_stage(record, stages),
                 "description": short_text(record.get("justification", ""), 110),
                 "leave_type":         normalize_cbc_text(record.get("leave_Details", "")) if module == "Leave" else "",
-                "leave_days_applied": _int(record.get("no_days_applying_for", 0)) if module == "Leave" else 0,
+                "leave_days_applied": _int(record.get("no_days_taken", 0)) if module == "Leave" else 0,
                 "leave_days_left":    _int(record.get("no_days_left", 0)) if module == "Leave" else 0,
             })
 
@@ -656,7 +656,7 @@ def load_all(db, sub_map, filters=None):
         rejected_count = len(rejected_records)
         rejected_amount = sum(amount_fn(r) for r in rejected_records)
         if module == "Leave":
-            rejected_days = sum(_int(r.get("no_days_applying_for", 0)) for r in rejected_records)
+            rejected_days = sum(_int(r.get("no_days_taken", 0)) for r in rejected_records)
             metric_label = f"{rejected_count} request{'s' if rejected_count != 1 else ''} ({rejected_days} day{'s' if rejected_days != 1 else ''})"
         else:
             metric_label = format_money(rejected_amount) or "₦0"
@@ -1120,7 +1120,7 @@ def load_all(db, sub_map, filters=None):
             if module == "Leave":
                 applicant   = short_text(staff_fn(record), 38)   # person who applied
                 leave_type  = normalize_cbc_text(record.get("leave_Details", "Leave"))
-                days_applied = _int(record.get("no_days_applying_for", 0))
+                days_applied = _int(record.get("no_days_taken", 0))
                 days_left    = _int(record.get("no_days_left", 0))
                 row_vendor  = applicant                           # use applicant name in "Vendor" column
                 row_amount  = "Nill"
