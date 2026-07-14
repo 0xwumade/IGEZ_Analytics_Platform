@@ -3,7 +3,6 @@
 A record-keeping and backup pipeline for the CBC Paperless application. It connects to MongoDB, syncs all request records, downloads supporting documents, and generates structured PDF reports per subsidiary — all in one run.
 
 ---
-
 ## What This Repo Does
 
 This system handles four core modules from the CBC Paperless platform:
