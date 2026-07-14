@@ -173,6 +173,14 @@ def load_all(db, sub_map, filters=None):
     end_date = filters.get("end_date")
     selected_sub = filters.get("subsidiary", "All")
 
+    # Defined early — used across all modules below
+    def requester(record, *fields):
+        for field in fields:
+            value = str(record.get(field, "") or "").strip()
+            if value:
+                return normalize_cbc_text(value)
+        return "Unknown"
+
     def subsidiary_matches(record):
         if selected_sub == "All":
             return True
@@ -412,12 +420,20 @@ def load_all(db, sub_map, filters=None):
                     f"{event_stage(field)} rejected", "#0b3a75"
                 )
 
+    _leave_name_fields = ("name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName")
+    def _leave_name(r):
+        for f in _leave_name_fields:
+            v = str(r.get(f, "") or "").strip()
+            if v:
+                return normalize_cbc_text(v)
+        return "Leave Request"
+
     activity_events = []
     add_record_activities(
         activity_events,
         all_leaves,
         "Leave",
-        lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"),
+        _leave_name,
         lambda r: "",
         "#1155cc",
     )
@@ -638,13 +654,6 @@ def load_all(db, sub_map, filters=None):
         key=lambda item: item["count"],
         reverse=True,
     )[:5]
-
-    def requester(record, *fields):
-        for field in fields:
-            value = str(record.get(field, "") or "").strip()
-            if value:
-                return normalize_cbc_text(value)
-        return "Unknown"
 
     staff_stats = defaultdict(lambda: {"count": 0, "amount": 0.0, "pending": 0, "rejected": 0, "modules": defaultdict(int)})
     staff_sources = [
