@@ -181,6 +181,38 @@ def load_all(db, sub_map, filters=None):
                 return normalize_cbc_text(value)
         return "Unknown"
 
+    # Build user lookup map: ObjectId string → name  (for leave requests)
+    _user_map = {}
+    try:
+        from bson import ObjectId as _ObjId
+        for u in db["UserNotRegistered"].find({}, {"_id": 1, "name": 1, "first_name": 1, "last_name": 1, "fullName": 1}):
+            uid = str(u["_id"])
+            name = (str(u.get("name") or "").strip()
+                    or f"{u.get('first_name','')} {u.get('last_name','')}".strip()
+                    or str(u.get("fullName") or "").strip())
+            if name:
+                _user_map[uid] = normalize_cbc_text(name)
+        # Also try the main User collection
+        for u in db["User"].find({}, {"_id": 1, "name": 1, "first_name": 1, "last_name": 1, "fullName": 1}):
+            uid = str(u["_id"])
+            if uid not in _user_map:
+                name = (str(u.get("name") or "").strip()
+                        or f"{u.get('first_name','')} {u.get('last_name','')}".strip()
+                        or str(u.get("fullName") or "").strip())
+                if name:
+                    _user_map[uid] = normalize_cbc_text(name)
+    except Exception:
+        pass
+
+    def leave_name(record):
+        """Resolve leave applicant name via unRegisterUser_id → UserNotRegistered collection."""
+        uid = str(record.get("unRegisterUser_id") or record.get("user_id") or "").strip()
+        if uid and uid in _user_map:
+            return _user_map[uid]
+        # Fallback: try direct name fields on the record
+        return requester(record, "name", "staff_name", "employee_name",
+                         "applicant_name", "full_name", "staffName", "employeeName")
+
     def subsidiary_matches(record):
         if selected_sub == "All":
             return True
@@ -433,7 +465,7 @@ def load_all(db, sub_map, filters=None):
         activity_events,
         all_leaves,
         "Leave",
-        _leave_name,
+        leave_name,
         lambda r: "",
         "#1155cc",
     )
@@ -511,7 +543,7 @@ def load_all(db, sub_map, filters=None):
     ]
 
     aging_modules = [
-        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: 0, leave_stages),
+        ("Leave", leaves, leave_name, lambda r: 0, leave_stages),
         ("Cash Advance", advances, lambda r: r.get("name", "Cash advance"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
         ("Expense Claim", expenses, lambda r: r.get("staff_name", "Expense claim"), ec_total_amount, finance_stages),
         ("RTPS", rtps, lambda r: r.get("name_of_supplier", "Supplier payment"), lambda r: safe_amount(r.get("amount", 0)), finance_stages),
@@ -657,7 +689,7 @@ def load_all(db, sub_map, filters=None):
 
     staff_stats = defaultdict(lambda: {"count": 0, "amount": 0.0, "pending": 0, "rejected": 0, "modules": defaultdict(int)})
     staff_sources = [
-        ("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: 0),
+        ("Leave", leaves, leave_name, lambda r: 0),
         ("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: safe_amount(r.get("amount", 0))),
         ("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), ec_total_amount),
     ]
@@ -1125,7 +1157,7 @@ def load_all(db, sub_map, filters=None):
     add_table_rows("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: "Cash Advance", lambda r: safe_amount(r.get("amount", 0)), finance_stages)
     add_table_rows("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), lambda r: "Expense Claim", ec_total_amount, finance_stages)
     add_table_rows("RTPS", rtps, lambda r: requester(r, "staff_name", "name"), lambda r: normalize_cbc_text(r.get("name_of_supplier", "Supplier")), lambda r: safe_amount(r.get("amount", 0)), finance_stages)
-    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name", "applicant_name", "full_name", "employee", "user_name", "staffName", "employeeName"), lambda r: None, lambda r: 0, leave_stages)
+    add_table_rows("Leave", leaves, leave_name, lambda r: None, lambda r: 0, leave_stages)
     data["operational_rows"] = sorted(
         operational_rows,
         key=lambda row: (row["status"] == "Pending", row["aging_days"], row["amount_value"]),
@@ -3164,19 +3196,34 @@ def api_search():
                 return sum(safe_amount(i.get("value", 0)) for i in items if isinstance(i, dict))
             return 0.0
 
+        # Build user map for leave name resolution in search
+        _search_user_map = {}
+        try:
+            from bson import ObjectId as _ObjId2
+            for u in db["UserNotRegistered"].find({}, {"_id": 1, "name": 1, "first_name": 1, "last_name": 1}):
+                uid = str(u["_id"])
+                nm = (str(u.get("name") or "").strip()
+                      or f"{u.get('first_name','')} {u.get('last_name','')}".strip())
+                if nm:
+                    _search_user_map[uid] = normalize_cbc_text(nm)
+        except Exception:
+            pass
+
         for r in db["Leave_Request"].find({}):
-            # For leave: staff = applicant name, vendor = leave type, amount = Nil
-            staff = normalize_cbc_text(str(r.get("name") or r.get("staff_name") or r.get("employee_name") or "")).strip()
-            vendor = normalize_cbc_text(str(r.get("leave_Details") or "Leave")).strip()
+            # Resolve staff name via unRegisterUser_id
+            uid = str(r.get("unRegisterUser_id") or "").strip()
+            staff = _search_user_map.get(uid) or normalize_cbc_text(
+                str(r.get("name") or r.get("staff_name") or r.get("employee_name") or "")).strip() or "—"
             rid = str(r.get("_id", ""))[-8:]
             sub = resolve_sub(r.get("subsidiary_id", ""), sub_map)
+            vendor = normalize_cbc_text(str(r.get("leave_Details") or "Leave")).strip()
             combined = " ".join([staff, vendor, rid, sub, "Leave"]).lower()
             if q in combined:
                 dt = record_date(r)
                 results.append({
                     "module": "Leave",
-                    "staff": staff or "—",
-                    "vendor": staff or "—",   # show applicant name in vendor column
+                    "staff": staff,
+                    "vendor": staff,   # show applicant name in vendor column
                     "subsidiary": sub,
                     "amount": "Nill",
                     "status": str(r.get("status") or "").title() or "Unknown",
