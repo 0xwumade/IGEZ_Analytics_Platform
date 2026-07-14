@@ -1596,17 +1596,11 @@ TEMPLATE = """
 
 <div class="header">
   <div style="display:flex; align-items:center; gap:18px;">
-    <div style="flex-shrink:0;width:52px;height:52px;border-radius:12px;overflow:hidden;box-shadow:0 4px 18px rgba(0,0,0,0.35);">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52" width="52" height="52">
-        <defs>
-          <linearGradient id="bg1" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#0f2d6e"/>
-            <stop offset="100%" style="stop-color:#1a56c4"/>
-          </linearGradient>
-        </defs>
-        <rect width="52" height="52" fill="url(#bg1)" rx="12"/>
-        <text x="26" y="33" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
-              font-size="16" font-weight="900" fill="#ffffff" letter-spacing="0.5">CBC</text>
+    <div style="flex-shrink:0;height:52px;display:flex;align-items:center;">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 44" width="90" height="44">
+        <rect x="0" y="0" width="90" height="44" rx="12" fill="#29b6f6"/>
+        <text x="45" y="31" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+              font-size="22" font-weight="900" fill="#ffffff" letter-spacing="2">CBC</text>
       </svg>
     </div>
     <div>
@@ -2485,17 +2479,11 @@ EXEC_TEMPLATE = """
     <header class="topbar">
       <div class="topbar-inner">
         <div style="display:flex;align-items:center;gap:10px;">
-          <div style="flex-shrink:0;width:38px;height:38px;border-radius:8px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,0.3);">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 38 38" width="38" height="38">
-              <defs>
-                <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" style="stop-color:#0f2d6e"/>
-                  <stop offset="100%" style="stop-color:#1a56c4"/>
-                </linearGradient>
-              </defs>
-              <rect width="38" height="38" fill="url(#bg2)" rx="8"/>
-              <text x="19" y="25" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
-                    font-size="12" font-weight="900" fill="#ffffff" letter-spacing="0.5">CBC</text>
+          <div style="flex-shrink:0;height:38px;display:flex;align-items:center;">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 34" width="72" height="34">
+              <rect x="0" y="0" width="72" height="34" rx="9" fill="#29b6f6"/>
+              <text x="36" y="24" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+                    font-size="17" font-weight="900" fill="#ffffff" letter-spacing="2">CBC</text>
             </svg>
           </div>
           <div>
