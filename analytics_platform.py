@@ -1603,26 +1603,10 @@ TEMPLATE = """
             <stop offset="0%" style="stop-color:#0f2d6e"/>
             <stop offset="100%" style="stop-color:#1a56c4"/>
           </linearGradient>
-          <linearGradient id="sh1" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" style="stop-color:#f5c518"/>
-            <stop offset="100%" style="stop-color:#e8a800"/>
-          </linearGradient>
-          <linearGradient id="ac1" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" style="stop-color:#4fc3f7"/>
-            <stop offset="100%" style="stop-color:#29b6f6"/>
-          </linearGradient>
         </defs>
-        <!-- Background -->
         <rect width="52" height="52" fill="url(#bg1)" rx="12"/>
-        <!-- Shield body -->
-        <path d="M26 7 L40 13 L40 27 Q40 38 26 45 Q12 38 12 27 L12 13 Z" fill="url(#sh1)" opacity="0.95"/>
-        <!-- Shield inner -->
-        <path d="M26 11 L37 16 L37 27 Q37 36 26 42 Q15 36 15 27 L15 16 Z" fill="url(#bg1)"/>
-        <!-- C letter -->
-        <text x="26" y="32" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
-              font-size="14" font-weight="900" fill="url(#ac1)" letter-spacing="-1">CBC</text>
-        <!-- Bottom accent bar -->
-        <rect x="16" y="34" width="20" height="2.5" rx="1.25" fill="#f5c518" opacity="0.85"/>
+        <text x="26" y="33" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+              font-size="16" font-weight="900" fill="#ffffff" letter-spacing="0.5">CBC</text>
       </svg>
     </div>
     <div>
@@ -2508,21 +2492,10 @@ EXEC_TEMPLATE = """
                   <stop offset="0%" style="stop-color:#0f2d6e"/>
                   <stop offset="100%" style="stop-color:#1a56c4"/>
                 </linearGradient>
-                <linearGradient id="sh2" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" style="stop-color:#f5c518"/>
-                  <stop offset="100%" style="stop-color:#e8a800"/>
-                </linearGradient>
-                <linearGradient id="ac2" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" style="stop-color:#4fc3f7"/>
-                  <stop offset="100%" style="stop-color:#29b6f6"/>
-                </linearGradient>
               </defs>
               <rect width="38" height="38" fill="url(#bg2)" rx="8"/>
-              <path d="M19 5 L30 10 L30 20 Q30 29 19 34 Q8 29 8 20 L8 10 Z" fill="url(#sh2)" opacity="0.95"/>
-              <path d="M19 8 L28 12 L28 20 Q28 28 19 32 Q10 28 10 20 L10 12 Z" fill="url(#bg2)"/>
-              <text x="19" y="24" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
-                    font-size="10" font-weight="900" fill="url(#ac2)" letter-spacing="-0.5">CBC</text>
-              <rect x="11" y="25" width="16" height="2" rx="1" fill="#f5c518" opacity="0.85"/>
+              <text x="19" y="25" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+                    font-size="12" font-weight="900" fill="#ffffff" letter-spacing="0.5">CBC</text>
             </svg>
           </div>
           <div>
