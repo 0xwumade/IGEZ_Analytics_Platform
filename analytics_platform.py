@@ -1596,8 +1596,35 @@ TEMPLATE = """
 
 <div class="header">
   <div style="display:flex; align-items:center; gap:18px;">
-    <img src="/static/cbc_logo.png" alt="CBC Logo"
-         style="height:52px; width:52px; border-radius:10px; object-fit:contain;">
+    <div style="flex-shrink:0;width:52px;height:52px;border-radius:12px;overflow:hidden;box-shadow:0 4px 18px rgba(0,0,0,0.35);">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52" width="52" height="52">
+        <defs>
+          <linearGradient id="bg1" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" style="stop-color:#0f2d6e"/>
+            <stop offset="100%" style="stop-color:#1a56c4"/>
+          </linearGradient>
+          <linearGradient id="sh1" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" style="stop-color:#f5c518"/>
+            <stop offset="100%" style="stop-color:#e8a800"/>
+          </linearGradient>
+          <linearGradient id="ac1" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" style="stop-color:#4fc3f7"/>
+            <stop offset="100%" style="stop-color:#29b6f6"/>
+          </linearGradient>
+        </defs>
+        <!-- Background -->
+        <rect width="52" height="52" fill="url(#bg1)" rx="12"/>
+        <!-- Shield body -->
+        <path d="M26 7 L40 13 L40 27 Q40 38 26 45 Q12 38 12 27 L12 13 Z" fill="url(#sh1)" opacity="0.95"/>
+        <!-- Shield inner -->
+        <path d="M26 11 L37 16 L37 27 Q37 36 26 42 Q15 36 15 27 L15 16 Z" fill="url(#bg1)"/>
+        <!-- C letter -->
+        <text x="26" y="32" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+              font-size="14" font-weight="900" fill="url(#ac1)" letter-spacing="-1">CBC</text>
+        <!-- Bottom accent bar -->
+        <rect x="16" y="34" width="20" height="2.5" rx="1.25" fill="#f5c518" opacity="0.85"/>
+      </svg>
+    </div>
     <div>
       <div style="font-size:11px; font-weight:600; letter-spacing:2px; opacity:0.7; text-transform:uppercase; margin-bottom:2px;">CBC · Powered by IGEZ</div>
       <div class="h1">IGEZ Analytics Dashboard</div>
@@ -2474,8 +2501,30 @@ EXEC_TEMPLATE = """
     <header class="topbar">
       <div class="topbar-inner">
         <div style="display:flex;align-items:center;gap:10px;">
-          <img src="/static/cbc_logo.png" alt="CBC Logo"
-               style="height:38px;width:38px;border-radius:7px;object-fit:contain;flex-shrink:0;">
+          <div style="flex-shrink:0;width:38px;height:38px;border-radius:8px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,0.3);">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 38 38" width="38" height="38">
+              <defs>
+                <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style="stop-color:#0f2d6e"/>
+                  <stop offset="100%" style="stop-color:#1a56c4"/>
+                </linearGradient>
+                <linearGradient id="sh2" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#f5c518"/>
+                  <stop offset="100%" style="stop-color:#e8a800"/>
+                </linearGradient>
+                <linearGradient id="ac2" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" style="stop-color:#4fc3f7"/>
+                  <stop offset="100%" style="stop-color:#29b6f6"/>
+                </linearGradient>
+              </defs>
+              <rect width="38" height="38" fill="url(#bg2)" rx="8"/>
+              <path d="M19 5 L30 10 L30 20 Q30 29 19 34 Q8 29 8 20 L8 10 Z" fill="url(#sh2)" opacity="0.95"/>
+              <path d="M19 8 L28 12 L28 20 Q28 28 19 32 Q10 28 10 20 L10 12 Z" fill="url(#bg2)"/>
+              <text x="19" y="24" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+                    font-size="10" font-weight="900" fill="url(#ac2)" letter-spacing="-0.5">CBC</text>
+              <rect x="11" y="25" width="16" height="2" rx="1" fill="#f5c518" opacity="0.85"/>
+            </svg>
+          </div>
           <div>
             <div style="font-size:10px;font-weight:700;letter-spacing:2px;opacity:0.55;text-transform:uppercase;">CBC · IGEZ Analytics</div>
             <div style="font-size:12px;font-weight:600;color:var(--muted);">Refreshed at {{ now }}</div>
