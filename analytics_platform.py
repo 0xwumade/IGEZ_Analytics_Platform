@@ -1067,13 +1067,31 @@ def load_all(db, sub_map, filters=None):
             days = pending_age_days(record) if status_group(record) == "pending" else 0
             waiting = next_stage(record, stages) if status_group(record) == "pending" else "Complete"
             priority = "High" if amount >= 5_000_000 or days >= 8 or waiting in {"CEO", "COO", "Chairman"} else "Normal"
+
+            # Leave-specific fields — non-financial, use day counts
+            if module == "Leave":
+                applicant   = short_text(staff_fn(record), 38)   # person who applied
+                leave_type  = normalize_cbc_text(record.get("leave_Details", "Leave"))
+                days_applied = _int(record.get("no_days_applying_for", 0))
+                days_left    = _int(record.get("no_days_left", 0))
+                row_vendor  = applicant                           # use applicant name in "Vendor" column
+                row_amount  = "Nil"
+                row_amount_value = 0
+            else:
+                leave_type   = ""
+                days_applied = 0
+                days_left    = 0
+                row_vendor   = short_text(vendor_fn(record), 38)
+                row_amount   = format_money(amount) or "NGN 0"
+                row_amount_value = amount
+
             operational_rows.append({
                 "date": table_date(record),
                 "request_id": record_id(record)[-8:] or "Unknown",
                 "staff": short_text(staff_fn(record), 34),
-                "vendor": short_text(vendor_fn(record), 38),
-                "amount": format_money(amount) or "NGN 0",
-                "amount_value": amount,
+                "vendor": row_vendor,
+                "amount": row_amount,
+                "amount_value": row_amount_value,
                 "status": table_status(record),
                 "aging": f"{days} days" if days else "-",
                 "aging_days": days,
@@ -1082,12 +1100,16 @@ def load_all(db, sub_map, filters=None):
                 "subsidiary": resolve_sub(record.get("subsidiary_id", ""), sub_map),
                 "priority": priority,
                 "details": short_text(record.get("justification", ""), 150),
+                # leave-only extras
+                "leave_type":    leave_type,
+                "leave_days_applied": days_applied,
+                "leave_days_left":    days_left,
             })
 
     add_table_rows("Cash Advance", advances, lambda r: requester(r, "name", "staff_name"), lambda r: "Cash Advance", lambda r: safe_amount(r.get("amount", 0)), finance_stages)
     add_table_rows("Expense Claim", expenses, lambda r: requester(r, "staff_name", "name"), lambda r: "Expense Claim", ec_total_amount, finance_stages)
     add_table_rows("RTPS", rtps, lambda r: requester(r, "staff_name", "name"), lambda r: normalize_cbc_text(r.get("name_of_supplier", "Supplier")), lambda r: safe_amount(r.get("amount", 0)), finance_stages)
-    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: normalize_cbc_text(r.get("leave_Details", "Leave")), lambda r: 0, leave_stages)
+    add_table_rows("Leave", leaves, lambda r: requester(r, "name", "staff_name", "employee_name"), lambda r: None, lambda r: 0, leave_stages)
     data["operational_rows"] = sorted(
         operational_rows,
         key=lambda row: (row["status"] == "Pending", row["aging_days"], row["amount_value"]),
@@ -2632,7 +2654,18 @@ EXEC_TEMPLATE = """
               <tr class="data-row" data-search="{{ row.date }} {{ row.request_id }} {{ row.staff }} {{ row.vendor }} {{ row.amount }} {{ row.status }} {{ row.aging }} {{ row.approval_level }} {{ row.module }} {{ row.subsidiary }} {{ row.priority }}" data-status="{{ row.status }}" data-priority="{{ row.priority }}" data-amount="{{ row.amount_value }}" data-aging="{{ row.aging_days }}">
                 <td>{{ row.date }}</td><td>{{ row.request_id }}</td><td>{{ row.staff }}</td><td>{{ row.vendor }}</td><td>{{ row.amount }}</td><td><span class="pill">{{ row.status }}</span></td><td>{{ row.aging }}</td><td>{{ row.approval_level }}</td><td><button class="chip expand-row" type="button">Open</button></td>
               </tr>
-              <tr class="row-detail"><td colspan="9"><strong>{{ row.module }} - {{ row.subsidiary }}</strong><br><span class="subtle">{{ row.details or "No additional request narrative captured." }}</span></td></tr>
+              <tr class="row-detail"><td colspan="9">
+                <strong>{{ row.module }} - {{ row.subsidiary }}</strong><br>
+                {% if row.module == "Leave" %}
+                  <span class="subtle">
+                    <strong>Leave Type:</strong> {{ row.leave_type or "—" }} &nbsp;|&nbsp;
+                    <strong>Days Applied:</strong> {{ row.leave_days_applied }} &nbsp;|&nbsp;
+                    <strong>Days Remaining:</strong> {{ row.leave_days_left }}
+                  </span>
+                {% else %}
+                  <span class="subtle">{{ row.details or "No additional request narrative captured." }}</span>
+                {% endif %}
+              </td></tr>
             {% endfor %}
             </tbody>
           </table>
@@ -3110,7 +3143,24 @@ def api_search():
             return 0.0
 
         for r in db["Leave_Request"].find({}):
-            _add("Leave", r, "name", "leave_Details", lambda _: 0)
+            # For leave: staff = applicant name, vendor = leave type, amount = Nil
+            staff = normalize_cbc_text(str(r.get("name") or r.get("staff_name") or r.get("employee_name") or "")).strip()
+            vendor = normalize_cbc_text(str(r.get("leave_Details") or "Leave")).strip()
+            rid = str(r.get("_id", ""))[-8:]
+            sub = resolve_sub(r.get("subsidiary_id", ""), sub_map)
+            combined = " ".join([staff, vendor, rid, sub, "Leave"]).lower()
+            if q in combined:
+                dt = record_date(r)
+                results.append({
+                    "module": "Leave",
+                    "staff": staff or "—",
+                    "vendor": staff or "—",   # show applicant name in vendor column
+                    "subsidiary": sub,
+                    "amount": "Nil",
+                    "status": str(r.get("status") or "").title() or "Unknown",
+                    "date": dt.strftime("%d %b %Y") if dt else "—",
+                    "request_id": rid,
+                })
         for r in db["CashAdvance"].find({}):
             _add("Cash Advance", r, "name", "name", lambda rec: safe_amount(rec.get("amount", 0)))
         for r in db["ExpenseClaim"].find({}):
