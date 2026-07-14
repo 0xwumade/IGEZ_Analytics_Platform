@@ -68,6 +68,7 @@ def normalize_cbc_text(value):
 
 def resolve_sub(sub_id, sub_map):
     name = normalize_cbc_text(sub_map.get(str(sub_id), "Unknown"))
+    
     # Treat excluded/test subsidiaries as Unknown so their records are filtered out
     if name.strip().lower() in _EXCLUDED_SUBSIDIARIES:
         return "Unknown"
@@ -210,24 +211,40 @@ def load_all(db, sub_map, filters=None):
             if subsidiary_matches(r) and record_date(r) and start <= record_date(r) < end
         )
 
-    # Leave Requests
+    # Leave Requests  (non-financial — tracked by headcount and days, never ₦)
     all_leaves = list(db["Leave_Request"].find({}))
     leaves = apply_filters(all_leaves)
     data["leave_total"]   = len(leaves)
     data["leave_approved"]= sum(1 for r in leaves if r.get("status") == "Approved")
     data["leave_pending"] = sum(1 for r in leaves if r.get("status") == "Pending")
+    data["leave_rejected"]= sum(1 for r in leaves if str(r.get("status","")).strip().lower() == "rejected")
 
-    leave_by_sub = defaultdict(int)
-    leave_by_type = defaultdict(int)
-    leave_by_month = defaultdict(int)
+    # Day-count metrics — use integer fields from the document
+    def _int(val):
+        try: return int(val)
+        except (TypeError, ValueError): return 0
+
+    data["leave_days_applied"]  = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves)
+    data["leave_days_approved"] = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves if r.get("status") == "Approved")
+    data["leave_days_pending"]  = sum(_int(r.get("no_days_applying_for", 0)) for r in leaves if r.get("status") == "Pending")
+
+    leave_by_sub   = defaultdict(int)   # request count per subsidiary
+    leave_by_type  = defaultdict(int)   # request count per leave type
+    leave_by_month = defaultdict(int)   # request count per month
+    leave_days_by_type = defaultdict(int)  # days applied per leave type
     for r in leaves:
-        leave_by_sub[resolve_sub(r.get("subsidiary_id",""), sub_map)] += 1
-        leave_by_type[r.get("leave_Details", "Unknown")] += 1
+        sub  = resolve_sub(r.get("subsidiary_id", ""), sub_map)
+        ltyp = r.get("leave_Details", "Unknown")
+        days = _int(r.get("no_days_applying_for", 0))
+        leave_by_sub[sub]   += 1
+        leave_by_type[ltyp] += 1
         leave_by_month[month_label(r.get("createdAt"))] += 1
+        leave_days_by_type[ltyp] += days
 
-    data["leave_by_sub"]   = dict(sorted(leave_by_sub.items()))
-    data["leave_by_type"]  = dict(sorted(leave_by_type.items()))
-    data["leave_by_month"] = dict(sorted(leave_by_month.items()))
+    data["leave_by_sub"]        = dict(sorted(leave_by_sub.items()))
+    data["leave_by_type"]       = dict(sorted(leave_by_type.items()))
+    data["leave_by_month"]      = dict(sorted(leave_by_month.items()))
+    data["leave_days_by_type"]  = dict(sorted(leave_days_by_type.items()))
 
     # Cash Advance
     all_advances = list(db["CashAdvance"].find({}))
@@ -583,8 +600,12 @@ def load_all(db, sub_map, filters=None):
         rejected_records = [r for r in records if is_rejected(r)]
         rejected_count = len(rejected_records)
         rejected_amount = sum(amount_fn(r) for r in rejected_records)
-        metric_label = f"{rejected_count} request{'s' if rejected_count != 1 else ''}" if module == "Leave" else format_money(rejected_amount) or "₦0"
-        metric_type = "Count" if module == "Leave" else "Value"
+        if module == "Leave":
+            rejected_days = sum(_int(r.get("no_days_applying_for", 0)) for r in rejected_records)
+            metric_label = f"{rejected_count} request{'s' if rejected_count != 1 else ''} ({rejected_days} day{'s' if rejected_days != 1 else ''})"
+        else:
+            metric_label = format_money(rejected_amount) or "₦0"
+        metric_type = "Count (days)" if module == "Leave" else "Value"
         for r in rejected_records:
             rejection_by_sub[resolve_sub(r.get("subsidiary_id", ""), sub_map)] += 1
             for stage, field in rejection_event_fields:
@@ -1852,7 +1873,12 @@ TEMPLATE = """
     <div class="kpi" style="--accent:#1155cc">
       <div class="label">Leave Requests</div>
       <div class="value">{{ d.leave_approved }}/{{ d.leave_total }}</div>
-      <div class="sub">{{ d.leave_approved }} approved - {{ d.leave_pending }} pending</div>
+      <div class="sub">{{ d.leave_approved }} approved · {{ d.leave_pending }} pending · {{ d.leave_rejected }} rejected</div>
+      <div class="amount-breakdown">
+        <div><span>Days applied</span><strong>{{ d.leave_days_applied }}</strong></div>
+        <div><span>Days approved</span><strong>{{ d.leave_days_approved }}</strong></div>
+        <div><span>Days pending</span><strong>{{ d.leave_days_pending }}</strong></div>
+      </div>
     </div>
     <div class="kpi" style="--accent:#1d6ff2">
       <div class="label">Cash Advances</div>
@@ -1906,6 +1932,9 @@ TEMPLATE = """
   </div>
   <div class="chart-grid-2" style="margin-top:16px">
     <div class="chart-card full">{{ charts.leave_trend | safe }}</div>
+  </div>
+  <div class="chart-grid-2" style="margin-top:16px">
+    <div class="chart-card full">{{ charts.leave_days_by_type | safe }}</div>
   </div>
 
   <!-- Cash advance -->
@@ -3116,6 +3145,24 @@ def dashboard_page(tab):
     BLUE_DEEP = "#0b3a75"
 
     charts = {}
+    if tab in {"overview", "rtps-analytics", "vendor-insights", "cash-advance", "subsidiaries", "audit-risk", "reports", "pending-approvals"}:
+        # Leave charts — always built (shown on overview and any tab that needs them)
+        charts["leave_by_sub"]  = bar(
+            list(d["leave_by_sub"].keys()), list(d["leave_by_sub"].values()),
+            "Leave Requests by Subsidiary (count)", BLUE)
+        charts["leave_by_type"] = bar(
+            list(d["leave_by_type"].keys()), list(d["leave_by_type"].values()),
+            "Leave Requests by Type (count)", BLUE_LIGHT)
+        charts["leave_status"]  = pie(
+            ["Approved", "Pending", "Rejected"],
+            [d["leave_approved"], d["leave_pending"], d["leave_rejected"]],
+            "Leave Request Status")
+        charts["leave_trend"]   = line(
+            list(d["leave_by_month"].keys()), list(d["leave_by_month"].values()),
+            "Leave Requests — Monthly Trend (count)", BLUE)
+        charts["leave_days_by_type"] = bar(
+            list(d["leave_days_by_type"].keys()), list(d["leave_days_by_type"].values()),
+            "Total Days Applied by Leave Type", BLUE_SOFT)
     if tab in {"rtps-analytics", "vendor-insights"}:
         charts["rtps_by_sub"]    = bar(list(d["rtps_by_sub"].keys()), list(d["rtps_by_sub"].values()), "RTPS Amount by Subsidiary (₦)", BLUE_DEEP)
         charts["rtps_by_mode"]   = pie(list(d["rtps_by_mode"].keys()), list(d["rtps_by_mode"].values()), "Payment Mode")
