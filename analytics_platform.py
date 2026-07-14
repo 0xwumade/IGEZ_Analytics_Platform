@@ -872,7 +872,7 @@ def load_all(db, sub_map, filters=None):
     def bottleneck(label, records, field, amount_fn, previous_field=None, is_leave=False):
         count, amount, avg_days = waiting_stage_details(records, field, amount_fn, previous_field)
         if is_leave:
-            waiting_label = "Nill"
+            waiting_label = "0"
         else:
             waiting_label = format_money(amount) or "₦0"
         return {
@@ -1230,6 +1230,20 @@ def chart_layout(fig, title, height, margin, font_size=11, xlabel="", ylabel="")
     fig.update_yaxes(showgrid=False, zeroline=False, showline=False)
     return fig
 
+# Plotly modebar: keep only download (camera) and zoom, remove everything else
+_CHART_CONFIG = {
+    "modeBarButtonsToRemove": [
+        "pan2d", "select2d", "lasso2d", "zoomIn2d", "zoomOut2d",
+        "autoScale2d", "hoverClosestCartesian", "hoverCompareCartesian",
+        "toggleSpikelines", "zoom3d", "pan3d", "orbitRotation",
+        "tableRotation", "resetCameraDefault3d", "resetCameraLastSave3d",
+        "hoverClosest3d", "zoomInGeo", "zoomOutGeo", "resetGeo",
+        "hoverClosestGeo", "hoverClosestGl2d", "hoverClosestPie",
+        "toggleHover", "resetViews", "sendDataToCloud",
+    ],
+    "displaylogo": False,
+}
+
 
 def bar(x, y, title, color="#1155cc", xlabel="", ylabel=""):
     fig = go.Figure(go.Bar(
@@ -1239,7 +1253,7 @@ def bar(x, y, title, color="#1155cc", xlabel="", ylabel=""):
         textposition="outside"
     ))
     chart_layout(fig, title, 320, dict(t=50, b=40, l=40, r=20), xlabel=xlabel, ylabel=ylabel)
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False, config=_CHART_CONFIG)
 
 
 def pie(labels, values, title):
@@ -1249,7 +1263,7 @@ def pie(labels, values, title):
         marker=dict(colors=blue_scale(len(values)), line=dict(color="white", width=2))
     ))
     chart_layout(fig, title, 320, dict(t=50, b=20, l=20, r=20))
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False, config=_CHART_CONFIG)
 
 
 def line(x, y, title, color="#1155cc"):
@@ -1267,7 +1281,7 @@ def line(x, y, title, color="#1155cc"):
     chart_layout(fig, title, 300, dict(t=50, b=40, l=40, r=20))
     fig.update_xaxes(type="category")
     fig.update_yaxes(range=y_range, rangemode="tozero")
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False, config=_CHART_CONFIG)
 
 
 def hbar(x, y, title, color="#1155cc"):
@@ -1278,7 +1292,7 @@ def hbar(x, y, title, color="#1155cc"):
         textposition="outside"
     ))
     chart_layout(fig, title, 340, dict(t=50, b=20, l=120, r=60), font_size=10)
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False, config=_CHART_CONFIG)
 
 # HTML template
 
