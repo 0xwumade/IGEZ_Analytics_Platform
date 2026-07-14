@@ -1230,18 +1230,12 @@ def chart_layout(fig, title, height, margin, font_size=11, xlabel="", ylabel="")
     fig.update_yaxes(showgrid=False, zeroline=False, showline=False)
     return fig
 
-# Plotly modebar: keep only download (camera) and zoom, remove everything else
+# Plotly modebar: explicitly show ONLY download (toImage) and zoom2d
+# Using modeBarButtons whitelist is the only reliable way
 _CHART_CONFIG = {
-    "modeBarButtonsToRemove": [
-        "pan2d", "select2d", "lasso2d", "zoomIn2d", "zoomOut2d",
-        "autoScale2d", "hoverClosestCartesian", "hoverCompareCartesian",
-        "toggleSpikelines", "zoom3d", "pan3d", "orbitRotation",
-        "tableRotation", "resetCameraDefault3d", "resetCameraLastSave3d",
-        "hoverClosest3d", "zoomInGeo", "zoomOutGeo", "resetGeo",
-        "hoverClosestGeo", "hoverClosestGl2d", "hoverClosestPie",
-        "toggleHover", "resetViews", "sendDataToCloud",
-    ],
+    "modeBarButtons": [["toImage", "zoom2d"]],
     "displaylogo": False,
+    "scrollZoom": False,
 }
 
 
