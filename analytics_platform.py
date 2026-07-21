@@ -3075,10 +3075,64 @@ def build_executive_pdf(d, filters, now):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
     def pdf_text(value):
-        return escape(str(value or ""))
+        # Replace Naira symbol with NGN for font compatibility in PDF
+        text = escape(str(value or ""))
+        text = text.replace("₦", "NGN ")
+        return text
+
+    def format_date_range(filters):
+        """Generate a human-readable date range description in day, month, year format."""
+        from datetime import datetime
+        
+        raw_start = filters.get("start", "").strip() if filters.get("start") else ""
+        raw_end = filters.get("end", "").strip() if filters.get("end") else ""
+        period = filters.get("period", "all")
+        
+        def format_date_str(date_str):
+            """Convert YYYY-MM-DD to day month year format (e.g., 1 February 2026)."""
+            if not date_str:
+                return ""
+            
+            date_str_clean = str(date_str).strip()
+            if not date_str_clean:
+                return ""
+                
+            try:
+                dt = datetime.strptime(date_str_clean, "%Y-%m-%d")
+                day = dt.day
+                month = dt.strftime("%B")
+                year = dt.year
+                return f"{day} {month} {year}"
+            except (ValueError, AttributeError) as e:
+                # If parsing fails, return original string
+                return date_str_clean
+        
+        # Check for custom date range
+        if raw_start and raw_end:
+            start_fmt = format_date_str(raw_start)
+            end_fmt = format_date_str(raw_end)
+            return f"Custom: {start_fmt} to {end_fmt}"
+        elif raw_start:
+            start_fmt = format_date_str(raw_start)
+            return f"From {start_fmt} to Present"
+        elif raw_end:
+            end_fmt = format_date_str(raw_end)
+            return f"Until {end_fmt}"
+        
+        # Fall back to period names
+        period_names = {
+            "all": "All time",
+            "today": "Today",
+            "week": "This week",
+            "month": "This month",
+            "quarter": "This quarter",
+            "year": "This year",
+        }
+        return period_names.get(period, period)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
@@ -3087,17 +3141,22 @@ def build_executive_pdf(d, filters, now):
     section = ParagraphStyle("ExecSection", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#082f63"), spaceBefore=12)
     body = ParagraphStyle("ExecBody", parent=styles["BodyText"], fontSize=9, leading=12)
     small = ParagraphStyle("ExecSmall", parent=styles["BodyText"], fontSize=8, leading=10, textColor=colors.HexColor("#456489"))
+    date_range_style = ParagraphStyle("DateRange", parent=styles["Heading3"], fontSize=11, textColor=colors.HexColor("#0b3a75"), spaceBefore=6, alignment=TA_LEFT, fontName="Helvetica-Bold")
+
+    date_range_str = format_date_range(filters)
+    subsidiary_str = filters.get("subsidiary", "All")
 
     story = [
         Paragraph("IGEZ Executive Analytics Brief", title),
-        Paragraph(f"Generated: {pdf_text(now)} | Period: {pdf_text(filters.get('period', 'all'))} | Subsidiary: {pdf_text(filters.get('subsidiary', 'All'))}", small),
-        Spacer(1, 10),
+        Paragraph(f"Generated: {pdf_text(now)}", small),
+        Paragraph(f"Data Period: {date_range_str} | Subsidiary: {subsidiary_str}", date_range_style),
+        Spacer(1, 12),
     ]
     kpis = [
         ["Health", f"{d['health']['status']} ({d['health']['score']}/100)"],
-        ["Approved Spend", f"₦{d['approved_spend']:,.0f}"],
-        ["Waiting Approval", f"₦{d['pending_spend']:,.0f}"],
-        ["This Month Spend", f"₦{d['month_compare']['spend']:,.0f}"],
+        ["Approved Spend", f"NGN {d['approved_spend']:,.0f}"],
+        ["Waiting Approval", f"NGN {d['pending_spend']:,.0f}"],
+        ["This Month Spend", f"NGN {d['month_compare']['spend']:,.0f}"],
         ["Total Requests", f"{d['total_approved_requests']}/{d['total_requests']} approved"],
         ["Oldest Pending", f"{d['oldest_pending_days']} days"],
     ]
@@ -3336,11 +3395,12 @@ def executive_report():
     try:
         now, filters, _sub_options, d = dashboard_payload()
         pdf = build_executive_pdf(d, filters, now)
+        subsidiary = filters.get("subsidiary", "All").lower().replace(" ", "-")
         return send_file(
             pdf,
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=f"igez-executive-brief-{app_now().strftime('%Y-%m-%d')}.pdf",
+            download_name=f"{subsidiary}-igez-executive-{app_now().strftime('%Y-%m-%d')}.pdf",
         )
     except (PyMongoError, RuntimeError, ValueError, ImportError) as exc:
         return render_template_string(
